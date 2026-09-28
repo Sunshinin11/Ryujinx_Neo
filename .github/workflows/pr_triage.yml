@@ -22,7 +22,7 @@ jobs:
            ref: master
 
       - name: Update labels based on changes
-        uses: actions/labeler@v5
+        uses: actions/labeler@v7
         with:
           sync-labels: true
           dot: true

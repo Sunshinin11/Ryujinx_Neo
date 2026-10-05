@@ -16,6 +16,12 @@ namespace Ryujinx.Graphics.GAL
         
         uint ProgramCount { get; }
 
+        /// <summary>
+        /// NEOV2 CONDRENDER1: when true, conditional rendering whose values still have pending GPU writes is
+        /// rendered unconditionally instead of waiting for the GPU on the CPU. Matches Eden on Turnip/Qualcomm.
+        /// </summary>
+        bool PreferUnconditionalRenderingOverReadback => false;
+
         void BackgroundContextAction(Action action, bool alwaysBackground = false);
 
         BufferHandle CreateBuffer(int size, BufferAccess access = BufferAccess.Default);

@@ -12,7 +12,8 @@ namespace Ryujinx.Graphics.Vulkan
             VulkanRenderer gd,
             Device device,
             ReadOnlyCollection<ResourceDescriptorCollection> setDescriptors,
-            bool usePushDescriptors)
+            bool usePushDescriptors,
+            bool useDynamicUniformBuffers)
         {
             DescriptorSetLayout[] layouts = new DescriptorSetLayout[setDescriptors.Count];
             bool[] updateAfterBindFlags = new bool[setDescriptors.Count];
@@ -52,7 +53,11 @@ namespace Ryujinx.Graphics.Vulkan
                     layoutBindings[descIndex] = new DescriptorSetLayoutBinding
                     {
                         Binding = (uint)descriptor.Binding,
-                        DescriptorType = descriptor.Type.Convert(),
+                        DescriptorType = useDynamicUniformBuffers &&
+                            setIndex == PipelineBase.UniformSetIndex &&
+                            descriptor.Type == ResourceType.UniformBuffer
+                                ? DescriptorType.UniformBufferDynamic
+                                : descriptor.Type.Convert(),
                         DescriptorCount = (uint)descriptor.Count,
                         StageFlags = stages.Convert(),
                     };

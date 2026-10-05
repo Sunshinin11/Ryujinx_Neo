@@ -100,15 +100,31 @@ namespace Ryujinx.HLE.HOS.Applets
                     else
                     {
                         // Create a text handler that converts keyboard strokes to strings.
-                        _dynamicTextInputHandler = _device.UIHandler.CreateDynamicTextInputHandler();
-                        _dynamicTextInputHandler.TextChangedEvent += HandleTextChangedEvent;
-                        _dynamicTextInputHandler.KeyPressedEvent += HandleKeyPressedEvent;
+                        // NEOV2-KBD1: the Android frontend has no inline keyboard (CreateDynamicTextInputHandler
+                        // throws NotImplementedException), which killed the applet thread and froze games such as
+                        // GRID Autosport. Without it, MustShow falls back to the regular input dialog.
+                        try
+                        {
+                            _dynamicTextInputHandler = _device.UIHandler.CreateDynamicTextInputHandler();
+                        }
+                        catch (NotImplementedException)
+                        {
+                            _dynamicTextInputHandler = null;
 
-                        _npads = new NpadReader(_device);
-                        _npads.NpadButtonDownEvent += HandleNpadButtonDownEvent;
-                        _npads.NpadButtonUpEvent += HandleNpadButtonUpEvent;
+                            Logger.Info?.Print(LogClass.ServiceAm, "[NEOV2-KBD1] Inline software keyboard not available; using the input dialog instead");
+                        }
 
-                        _keyboardRenderer = new SoftwareKeyboardRenderer(_device.UIHandler.HostUITheme);
+                        if (_dynamicTextInputHandler != null)
+                        {
+                            _dynamicTextInputHandler.TextChangedEvent += HandleTextChangedEvent;
+                            _dynamicTextInputHandler.KeyPressedEvent += HandleKeyPressedEvent;
+
+                            _npads = new NpadReader(_device);
+                            _npads.NpadButtonDownEvent += HandleNpadButtonDownEvent;
+                            _npads.NpadButtonUpEvent += HandleNpadButtonUpEvent;
+
+                            _keyboardRenderer = new SoftwareKeyboardRenderer(_device.UIHandler.HostUITheme);
+                        }
                     }
 
                     return ResultCode.Success;
@@ -453,17 +469,27 @@ namespace Ryujinx.HLE.HOS.Applets
 
                     if (updateText)
                     {
-                        _dynamicTextInputHandler.SetText(_textValue, _cursorBegin);
-                        _keyboardRenderer.UpdateTextState(_textValue, _cursorBegin, _cursorBegin, null, null);
+                        _dynamicTextInputHandler?.SetText(_textValue, _cursorBegin);
+                        _keyboardRenderer?.UpdateTextState(_textValue, _cursorBegin, _cursorBegin, null, null);
                     }
 
                     if ((newCalc.Flags & KeyboardCalcFlags.MustShow) != 0)
                     {
-                        ActivateFrontend();
+                        bool inlineUi = _dynamicTextInputHandler != null;
+
+                        if (inlineUi)
+                        {
+                            ActivateFrontend();
+                        }
 
                         _backgroundState = InlineKeyboardState.Shown;
 
                         PushChangedString(_textValue, (uint)_cursorBegin, _backgroundState);
+
+                        if (!inlineUi)
+                        {
+                            ShowInputDialogFallback(newCalc.Appear);
+                        }
                     }
 
                     // Send the response to the Calc
@@ -510,8 +536,84 @@ namespace Ryujinx.HLE.HOS.Applets
             _inputMode = KeyboardInputMode.ControllerAndKeyboard;
             _canAcceptController = false;
 
-            _dynamicTextInputHandler.TextProcessingEnabled = false;
-            _dynamicTextInputHandler.SetText(_textValue, _cursorBegin);
+            if (_dynamicTextInputHandler != null)
+            {
+                _dynamicTextInputHandler.TextProcessingEnabled = false;
+                _dynamicTextInputHandler.SetText(_textValue, _cursorBegin);
+            }
+        }
+
+        /// <summary>
+        /// NEOV2-KBD1: shows the regular input dialog when there is no inline keyboard UI (Android) and returns
+        /// the typed text to the game as if the inline keyboard had been confirmed or cancelled.
+        /// </summary>
+        private void ShowInputDialogFallback(SoftwareKeyboardAppearEx appear)
+        {
+            string initialText = _textValue ?? string.Empty;
+
+            SoftwareKeyboardUIArgs args = new()
+            {
+                KeyboardMode = appear.KeyboardMode,
+                HeaderText = string.Empty,
+                SubtitleText = string.Empty,
+                GuideText = string.Empty,
+                SubmitText = !string.IsNullOrWhiteSpace(appear.OkText) ? StripUnicodeControlCodes(appear.OkText) : "OK",
+                StringLengthMin = Math.Max(0, appear.TextMinLength),
+                StringLengthMax = appear.TextMaxLength > 0 ? appear.TextMaxLength : 100,
+                InitialText = initialText,
+            };
+
+            Thread dialogThread = new(() =>
+            {
+                bool accepted = false;
+                string text = initialText;
+
+                try
+                {
+                    if (_device.UIHandler != null)
+                    {
+                        accepted = _device.UIHandler.DisplayInputDialog(args, out text);
+                    }
+                    else
+                    {
+                        accepted = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warning?.Print(LogClass.ServiceAm, $"[NEOV2-KBD1] Input dialog failed: {ex.Message}");
+                }
+
+                text ??= initialText;
+
+                if (text.Length > args.StringLengthMax)
+                {
+                    text = text[..args.StringLengthMax];
+                }
+
+                lock (_lock)
+                {
+                    if (_backgroundState == InlineKeyboardState.Shown)
+                    {
+                        if (accepted)
+                        {
+                            // NEOV2-KBD2: envia o texto digitado como alteracao do campo (ChangedString), como o
+                            // teclado inline faz enquanto se digita. Sem isso o jogo aceitava o texto mas nao o
+                            // mostrava no proprio campo.
+                            _cursorBegin = text.Length;
+                            PushUpdatedState(text, text.Length, KeyboardResult.NotSet);
+                        }
+
+                        PushUpdatedState(text, text.Length, accepted ? KeyboardResult.Accept : KeyboardResult.Cancel);
+                    }
+                }
+            })
+            {
+                Name = "HLE.SoftwareKeyboard.Dialog",
+                IsBackground = true,
+            };
+
+            dialogThread.Start();
         }
 
         private void DestroyFrontend()

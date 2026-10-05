@@ -608,14 +608,23 @@ namespace Ryujinx.Graphics.Vulkan
                     {
                         // Need to do a slow upload.
                         BufferHolder srcHolder = _gd.BufferManager.Create(_gd, dataSize, baseType: BufferAllocationType.HostMapped);
-                        srcHolder.SetDataUnchecked(0, data);
 
-                        Auto<DisposableBuffer> srcBuffer = srcHolder.GetBuffer();
-                        Auto<DisposableBuffer> dstBuffer = this.GetBuffer(cbs.Value.CommandBuffer, true);
+                        if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled && srcHolder == null)
+                        {
+                            // NEOV2-COSMIC2: o buffer temporario nao pode ser criado (ex.: tamanho grande demais).
+                            // Antes isso dava NullReferenceException; agora o upload e ignorado.
+                        }
+                        else
+                        {
+                            srcHolder.SetDataUnchecked(0, data);
 
-                        Copy(_gd, cbs.Value, srcBuffer, dstBuffer, 0, offset, dataSize);
+                            Auto<DisposableBuffer> srcBuffer = srcHolder.GetBuffer();
+                            Auto<DisposableBuffer> dstBuffer = this.GetBuffer(cbs.Value.CommandBuffer, true);
 
-                        srcHolder.Dispose();
+                            Copy(_gd, cbs.Value, srcBuffer, dstBuffer, 0, offset, dataSize);
+
+                            srcHolder.Dispose();
+                        }
                     }
 
                     if (rentCbs)
@@ -713,6 +722,13 @@ namespace Ryujinx.Graphics.Vulkan
             int size,
             bool registerSrcUsage = true)
         {
+            if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled && (src == null || dst == null))
+            {
+                // NEOV2-COSMIC2: um dos buffers nao existe no backend (a criacao falhou, ex.: ~3 GB no
+                // Marvel Cosmic Invasion). Antes isso dava NullReferenceException na thread do renderer.
+                return;
+            }
+
             VkBuffer srcBuffer = registerSrcUsage ? src.Get(cbs, srcOffset, size).Value : src.GetUnsafe().Value;
             VkBuffer dstBuffer = dst.Get(cbs, dstOffset, size, true).Value;
 

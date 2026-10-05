@@ -1,5 +1,4 @@
 using Ryujinx.Common.Memory;
-using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Shader;
 using Silk.NET.Vulkan;
@@ -40,22 +39,12 @@ namespace Ryujinx.Graphics.Vulkan
         protected bool IsMainPipeline;
         private PipelineState _newState;
 
-        // NEOV2 Etapa 23: last extended dynamic state values recorded on the current command buffer.
-        private bool _extendedDynamicStateValid;
-        private ulong _extendedDynamicStateApplied;
         private bool _graphicsStateDirty;
         private bool _computeStateDirty;
         private bool _bindingBarriersDirty;
         private PrimitiveTopology _topology;
 
         private ulong _currentPipelineHandle;
-
-        // MUA3: the crash scene consistently submits compute work immediately before the
-        // graphics command buffers that hang the Adreno command processor. Keep this state
-        // across command-buffer rotations so the first matching scene draw can establish a
-        // conservative memory dependency on all earlier compute work.
-        private bool _mua3ComputeSinceSceneBarrier;
-        private static int _mua3SceneBarrierCount;
 
         protected Auto<DisposablePipeline> Pipeline;
 
@@ -345,14 +334,7 @@ namespace Ryujinx.Graphics.Vulkan
             EndRenderPass();
             RecreateComputePipelineIfNeeded();
 
-            RecordMua3Command(Mua3CommandKind.Dispatch, groupsX, groupsY);
-
             Gd.Api.CmdDispatch(CommandBuffer, (uint)groupsX, (uint)groupsY, (uint)groupsZ);
-
-            if (GraphicsCompatibility.IsMua3)
-            {
-                _mua3ComputeSinceSceneBarrier = true;
-            }
         }
 
         public void DispatchComputeIndirect(Auto<DisposableBuffer> indirectBuffer, int indirectBufferOffset)
@@ -365,81 +347,13 @@ namespace Ryujinx.Graphics.Vulkan
             EndRenderPass();
             RecreateComputePipelineIfNeeded();
 
-            RecordMua3Command(Mua3CommandKind.DispatchIndirect, indirectBufferOffset, 0);
-
             Gd.Api.CmdDispatchIndirect(CommandBuffer, indirectBuffer.Get(Cbs, indirectBufferOffset, 12).Value, (ulong)indirectBufferOffset);
-
-            if (GraphicsCompatibility.IsMua3)
-            {
-                _mua3ComputeSinceSceneBarrier = true;
-            }
         }
 
-        private unsafe void InsertMua3SceneComputeBarrierIfNeeded()
-        {
-            if (!_mua3ComputeSinceSceneBarrier ||
-                !GraphicsCompatibility.IsMua3 ||
-                !GraphicsCompatibility.TryGetMua3Program(_program, out Mua3ShaderIdentity identity) ||
-                identity.Geometry != 0x100719F30UL ||
-                identity.Fragment != 0x100719E30UL)
-            {
-                return;
-            }
-
-            EndRenderPass();
-
-            MemoryBarrier memoryBarrier = new()
-            {
-                SType = StructureType.MemoryBarrier,
-                SrcAccessMask = AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
-                DstAccessMask = AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
-            };
-
-            Gd.Api.CmdPipelineBarrier(
-                CommandBuffer,
-                PipelineStageFlags.AllCommandsBit,
-                PipelineStageFlags.AllCommandsBit,
-                0,
-                1,
-                new ReadOnlySpan<MemoryBarrier>(in memoryBarrier),
-                0,
-                ReadOnlySpan<BufferMemoryBarrier>.Empty,
-                0,
-                ReadOnlySpan<ImageMemoryBarrier>.Empty);
-
-            _mua3ComputeSinceSceneBarrier = false;
-
-            int count = System.Threading.Interlocked.Increment(ref _mua3SceneBarrierCount);
-
-            if (count == 1 || count % 100 == 0)
-            {
-                Logger.Info?.Print(
-                    LogClass.Gpu,
-                    $"[MUA3-SYNC] Full compute-to-scene barrier inserted (count={count}, shaders=[{identity}])");
-            }
-        }
-
-        private void RecordMua3Command(Mua3CommandKind kind, int argument0, int argument1)
-        {
-            if (!GraphicsCompatibility.IsMua3)
-            {
-                return;
-            }
-
-            GraphicsCompatibility.TryGetMua3Program(_program, out Mua3ShaderIdentity shaderIdentity);
-
-            Mua3CrashTelemetry.RecordCommand(
-                CommandBuffer,
-                kind,
-                _currentPipelineHandle,
-                _newState.Internal.GetHashCode(),
-                _program == null ? 0 : RuntimeHelpers.GetHashCode(_program),
-                _program?.Stages ?? 0,
-                shaderIdentity,
-                (int)_topology,
-                argument0,
-                argument1);
-        }
+        // PipelineFull overrides these hooks to scope VK_EXT_conditional_rendering to the guest draw only.
+        // Keeping preparation and helper commands outside the scope prevents internal work from being skipped.
+        protected virtual void BeginHostConditionalRenderingForDraw() { }
+        protected virtual void EndHostConditionalRenderingForDraw() { }
 
         public void Draw(int vertexCount, int instanceCount, int firstVertex, int firstInstance)
         {
@@ -455,7 +369,6 @@ namespace Ryujinx.Graphics.Vulkan
 
             BeginRenderPass();
             DrawCount++;
-            RecordMua3Command(Mua3CommandKind.Draw, vertexCount, instanceCount);
 
             if (Gd.TopologyUnsupported(_topology))
             {
@@ -478,13 +391,17 @@ namespace Ryujinx.Graphics.Vulkan
                 BeginRenderPass(); // May have been interrupted to set buffer data.
                 ResumeTransformFeedbackInternal();
 
+                BeginHostConditionalRenderingForDraw();
                 Gd.Api.CmdDrawIndexed(CommandBuffer, (uint)indexCount, (uint)instanceCount, 0, firstVertex, (uint)firstInstance);
+                EndHostConditionalRenderingForDraw();
             }
             else
             {
                 ResumeTransformFeedbackInternal();
 
+                BeginHostConditionalRenderingForDraw();
                 Gd.Api.CmdDraw(CommandBuffer, (uint)vertexCount, (uint)instanceCount, (uint)firstVertex, (uint)firstInstance);
+                EndHostConditionalRenderingForDraw();
             }
         }
 
@@ -526,7 +443,6 @@ namespace Ryujinx.Graphics.Vulkan
 
             BeginRenderPass();
             DrawCount++;
-            RecordMua3Command(Mua3CommandKind.DrawIndexed, indexCount, instanceCount);
 
             if (_indexBufferPattern != null)
             {
@@ -545,13 +461,17 @@ namespace Ryujinx.Graphics.Vulkan
                 BeginRenderPass(); // May have been interrupted to set buffer data.
                 ResumeTransformFeedbackInternal();
 
+                BeginHostConditionalRenderingForDraw();
                 Gd.Api.CmdDrawIndexed(CommandBuffer, (uint)convertedCount, (uint)instanceCount, 0, firstVertex, (uint)firstInstance);
+                EndHostConditionalRenderingForDraw();
             }
             else
             {
                 ResumeTransformFeedbackInternal();
 
+                BeginHostConditionalRenderingForDraw();
                 Gd.Api.CmdDrawIndexed(CommandBuffer, (uint)indexCount, (uint)instanceCount, (uint)firstIndex, firstVertex, (uint)firstInstance);
+                EndHostConditionalRenderingForDraw();
             }
         }
 
@@ -570,7 +490,6 @@ namespace Ryujinx.Graphics.Vulkan
 
             BeginRenderPass();
             DrawCount++;
-            RecordMua3Command(Mua3CommandKind.DrawIndexedIndirect, indirectBuffer.Size, 1);
 
             if (_indexBufferPattern != null)
             {
@@ -592,13 +511,17 @@ namespace Ryujinx.Graphics.Vulkan
                 BeginRenderPass(); // May have been interrupted to set buffer data.
                 ResumeTransformFeedbackInternal();
 
+                BeginHostConditionalRenderingForDraw();
                 Gd.Api.CmdDrawIndexedIndirect(CommandBuffer, indirectBufferAuto.Get(Cbs, 0, indirectBuffer.Size).Value, 0, 1, (uint)indirectBuffer.Size);
+                EndHostConditionalRenderingForDraw();
             }
             else
             {
                 ResumeTransformFeedbackInternal();
 
+                BeginHostConditionalRenderingForDraw();
                 Gd.Api.CmdDrawIndexedIndirect(CommandBuffer, buffer, (ulong)indirectBuffer.Offset, 1, (uint)indirectBuffer.Size);
+                EndHostConditionalRenderingForDraw();
             }
         }
 
@@ -621,7 +544,6 @@ namespace Ryujinx.Graphics.Vulkan
 
             BeginRenderPass();
             DrawCount++;
-            RecordMua3Command(Mua3CommandKind.DrawIndexedIndirectCount, maxDrawCount, stride);
 
             if (_indexBufferPattern != null)
             {
@@ -642,6 +564,8 @@ namespace Ryujinx.Graphics.Vulkan
 
                 BeginRenderPass(); // May have been interrupted to set buffer data.
                 ResumeTransformFeedbackInternal();
+
+                BeginHostConditionalRenderingForDraw();
 
                 if (Gd.Capabilities.SupportsIndirectParameters)
                 {
@@ -666,10 +590,14 @@ namespace Ryujinx.Graphics.Vulkan
                         (uint)maxDrawCount,
                         (uint)stride);
                 }
+
+                EndHostConditionalRenderingForDraw();
             }
             else
             {
                 ResumeTransformFeedbackInternal();
+
+                BeginHostConditionalRenderingForDraw();
 
                 if (Gd.Capabilities.SupportsIndirectParameters)
                 {
@@ -692,6 +620,8 @@ namespace Ryujinx.Graphics.Vulkan
                         (uint)maxDrawCount,
                         (uint)stride);
                 }
+
+                EndHostConditionalRenderingForDraw();
             }
         }
 
@@ -711,9 +641,10 @@ namespace Ryujinx.Graphics.Vulkan
             BeginRenderPass();
             ResumeTransformFeedbackInternal();
             DrawCount++;
-            RecordMua3Command(Mua3CommandKind.DrawIndirect, indirectBuffer.Size, 1);
 
+            BeginHostConditionalRenderingForDraw();
             Gd.Api.CmdDrawIndirect(CommandBuffer, buffer, (ulong)indirectBuffer.Offset, 1, (uint)indirectBuffer.Size);
+            EndHostConditionalRenderingForDraw();
         }
 
         public void DrawIndirectCount(BufferRange indirectBuffer, BufferRange parameterBuffer, int maxDrawCount, int stride)
@@ -742,8 +673,8 @@ namespace Ryujinx.Graphics.Vulkan
             BeginRenderPass();
             ResumeTransformFeedbackInternal();
             DrawCount++;
-            RecordMua3Command(Mua3CommandKind.DrawIndirectCount, maxDrawCount, stride);
 
+            BeginHostConditionalRenderingForDraw();
             Gd.DrawIndirectCountApi.CmdDrawIndirectCount(
                 CommandBuffer,
                 buffer,
@@ -752,6 +683,7 @@ namespace Ryujinx.Graphics.Vulkan
                 (ulong)parameterBuffer.Offset,
                 (uint)maxDrawCount,
                 (uint)stride);
+            EndHostConditionalRenderingForDraw();
         }
 
         public void DrawTexture(ITexture texture, ISampler sampler, Extents2DF srcRegion, Extents2DF dstRegion)
@@ -1062,6 +994,11 @@ namespace Ryujinx.Graphics.Vulkan
         public void SetProgram(IProgram program)
         {
             ShaderCollection internalProgram = (ShaderCollection)program;
+
+            if (_program == internalProgram)
+            {
+                return;
+            }
             PipelineShaderStageCreateInfo[] stages = internalProgram.GetInfos();
 
             _program = internalProgram;
@@ -1520,7 +1457,6 @@ namespace Ryujinx.Graphics.Vulkan
             _descriptorSetUpdater.SignalCommandBufferChange();
             DynamicState.ForceAllDirty();
             _currentPipelineHandle = 0;
-            _extendedDynamicStateValid = false;
         }
 
         private void CreateFramebuffer(Span<ITexture> colors, ITexture depthStencil, bool filterWriteMasked)
@@ -1743,8 +1679,6 @@ namespace Ryujinx.Graphics.Vulkan
 
         private bool RecreateGraphicsPipelineIfNeeded()
         {
-            InsertMua3SceneComputeBarrierIfNeeded();
-
             if (FramebufferParams != null &&
                 FramebufferParams.AttachmentsCount == 0 &&
                 FramebufferParams.Width == 1 &&
@@ -1821,52 +1755,11 @@ namespace Ryujinx.Graphics.Vulkan
                 Pbp = PipelineBindPoint.Graphics;
             }
 
-            if (PipelineState.UsesExtendedDynamicState(Gd))
-            {
-                ApplyExtendedDynamicState();
-            }
-
             Gd.Barriers.Flush(Cbs, _program, _feedbackLoop != 0, RenderPassActive, _rpHolder, EndRenderPassDelegate);
 
             _descriptorSetUpdater.UpdateAndBindDescriptorSets(Cbs, PipelineBindPoint.Graphics);
 
             return true;
-        }
-
-        private void ApplyExtendedDynamicState()
-        {
-            ulong key = _newState.Internal.Id6 & PipelineState.ExtendedDynamicStateMask;
-
-            if (_extendedDynamicStateValid && key == _extendedDynamicStateApplied)
-            {
-                return;
-            }
-
-            Silk.NET.Vulkan.Extensions.EXT.ExtExtendedDynamicState api = Gd.ExtendedDynamicStateApi;
-
-            api.CmdSetCullMode(CommandBuffer, _newState.CullMode);
-            api.CmdSetFrontFace(CommandBuffer, _newState.FrontFace);
-            api.CmdSetDepthTestEnable(CommandBuffer, _newState.DepthTestEnable);
-            api.CmdSetDepthWriteEnable(CommandBuffer, _newState.DepthWriteEnable);
-            api.CmdSetDepthCompareOp(CommandBuffer, _newState.DepthCompareOp);
-            api.CmdSetStencilTestEnable(CommandBuffer, _newState.StencilTestEnable);
-            api.CmdSetStencilOp(
-                CommandBuffer,
-                StencilFaceFlags.FaceFrontBit,
-                _newState.StencilFrontFailOp,
-                _newState.StencilFrontPassOp,
-                _newState.StencilFrontDepthFailOp,
-                _newState.StencilFrontCompareOp);
-            api.CmdSetStencilOp(
-                CommandBuffer,
-                StencilFaceFlags.FaceBackBit,
-                _newState.StencilBackFailOp,
-                _newState.StencilBackPassOp,
-                _newState.StencilBackDepthFailOp,
-                _newState.StencilBackCompareOp);
-
-            _extendedDynamicStateApplied = key;
-            _extendedDynamicStateValid = true;
         }
 
         private bool CreatePipeline(PipelineBindPoint pbp)

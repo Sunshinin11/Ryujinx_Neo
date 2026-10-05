@@ -676,6 +676,9 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
 
                 mainThread.SetEntryArguments(0, mainThreadHandle);
 
+                // NEOV2-TLSHANDLE1: pass the main thread handle to its thread local region, like the real kernel.
+                mainThread.SetThreadLocalHandle(mainThreadHandle);
+
                 ProcessState oldState = State;
                 ProcessState newState = State != ProcessState.Created
                     ? ProcessState.Attached

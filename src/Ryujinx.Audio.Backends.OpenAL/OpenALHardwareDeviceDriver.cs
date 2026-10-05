@@ -23,6 +23,30 @@ namespace Ryujinx.Audio.Backends.OpenAL
 
         private float _volume;
 
+        /// <summary>
+        /// NEOV2-AUDIO1: amplificacao do audio (1.0 = 100%, 2.0 = 200%). O ganho da fonte do OpenAL e limitado
+        /// a 1.0 (AL_MAX_GAIN), entao a amplificacao vai no ganho do ouvinte, que nao tem esse limite.
+        /// </summary>
+        public static float OutputBoost { get; set; } = 1f;
+
+        private float _appliedBoost = -1f;
+
+        /// <summary>
+        /// NEOV2-AUDIO2: the Android output is stereo. Advertising 5.1 made the audio renderer mix in 5.1 and
+        /// OpenAL Soft fold it down to stereo by summing channels, which clips before any volume control
+        /// (sounds "blown out" even at low volume). With stereo only, games mix to stereo themselves, like a
+        /// Switch in handheld mode.
+        /// </summary>
+        public static bool StereoOnly { get; set; } = true;
+
+        /// <summary>
+        /// NEOV2-AUDIO2: jitter buffer. A stopped (or underrun) source only starts when this much audio is
+        /// queued, or after <see cref="PrerollTimeoutMilliseconds"/>, instead of on the first 5 ms buffer.
+        /// </summary>
+        public static int PrerollMilliseconds { get; set; } = 50;
+
+        public static int PrerollTimeoutMilliseconds { get; set; } = 30;
+
         public float Volume
         {
             get
@@ -123,6 +147,14 @@ namespace Ryujinx.Audio.Backends.OpenAL
 
             while (_stillRunning)
             {
+                float boost = Math.Clamp(OutputBoost, 1f, 2f);
+
+                if (boost != _appliedBoost)
+                {
+                    AL.Listener(ALListenerf.Gain, boost);
+                    _appliedBoost = boost;
+                }
+
                 bool updateRequired = false;
 
                 foreach (OpenALHardwareDeviceSession session in _sessions.Keys)
@@ -179,6 +211,11 @@ namespace Ryujinx.Audio.Backends.OpenAL
 
         public bool SupportsChannelCount(uint channelCount)
         {
+            if (StereoOnly)
+            {
+                return channelCount is 1 or 2;
+            }
+
             return channelCount is 1 or 2 or 6;
         }
 

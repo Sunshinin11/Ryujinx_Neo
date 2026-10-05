@@ -1,3 +1,4 @@
+using Ryujinx.Common.Diagnostics;
 using Ryujinx.Common.Logging;
 using System.Diagnostics;
 using System.Threading;
@@ -25,6 +26,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         public static void Record(int requested, int actual, int pending, int knownComplete)
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry || requested <= 0) return;
+
             if (requested <= 0)
             {
                 return;
@@ -39,6 +42,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         private static void TryLog()
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             long now = Stopwatch.GetTimestamp();
             long next = Volatile.Read(ref _nextSampleTimestamp);
 

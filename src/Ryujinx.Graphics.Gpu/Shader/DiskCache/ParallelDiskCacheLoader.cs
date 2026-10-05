@@ -638,7 +638,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
             bool hasGeometryShader = translatorContexts[4] != null;
             bool vertexHasStore = translatorContexts[1] != null && translatorContexts[1].HasStore;
             bool geometryHasStore = hasGeometryShader && translatorContexts[4].HasStore;
-            bool vertexToCompute = ShouldConvertVertexToCompute(_context, vertexHasStore, geometryHasStore, hasGeometryShader);
+            bool geometryIsPassthrough = hasGeometryShader && translatorContexts[4].GpPassthrough;
+            bool vertexToCompute = ShouldConvertVertexToCompute(_context, vertexHasStore, geometryHasStore, hasGeometryShader, geometryIsPassthrough);
 
             // We don't support caching shader stages that have been converted to compute currently,
             // so just eliminate them if they exist in the cache.

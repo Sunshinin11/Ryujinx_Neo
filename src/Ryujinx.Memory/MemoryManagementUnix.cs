@@ -27,6 +27,49 @@ namespace Ryujinx.Memory
             return AllocateInternal(size, MmapProts.PROT_NONE, forJit);
         }
 
+        private static nint NceProbeHint(ulong size, MmapProts prot)
+        {
+            if (size == 0x4000000000UL && prot == MmapProts.PROT_NONE)
+            {
+                return unchecked((nint)0x4000000000L);
+            }
+
+            return nint.Zero;
+        }
+
+        /// <summary>
+        /// NEOV2 NCE-LOWBASE1: reserves a range at the requested address
+        /// without MAP_FIXED, so existing mappings are never overwritten.
+        /// </summary>
+        public static nint ReserveAt(nint address, ulong size)
+        {
+            MmapFlags flags =
+                MmapFlags.MAP_ANONYMOUS |
+                MmapFlags.MAP_PRIVATE |
+                MmapFlags.MAP_NORESERVE;
+
+            nint ptr = Mmap(
+                address,
+                size,
+                MmapProts.PROT_NONE,
+                flags,
+                -1,
+                0);
+
+            if (ptr == MAP_FAILED)
+            {
+                return nint.Zero;
+            }
+
+            if (ptr != address || !_allocations.TryAdd(ptr, size))
+            {
+                munmap(ptr, size);
+                return nint.Zero;
+            }
+
+            return ptr;
+        }
+
         private static nint AllocateInternal(ulong size, MmapProts prot, bool forJit, bool shared = false)
         {
             MmapFlags flags = MmapFlags.MAP_ANONYMOUS;
@@ -55,7 +98,7 @@ namespace Ryujinx.Memory
                 }
             }
 
-            nint ptr = Mmap(nint.Zero, size, prot, flags, -1, 0);
+            nint ptr = Mmap(NceProbeHint(size, prot), size, prot, flags, -1, 0);
 
             if (ptr == MAP_FAILED)
             {

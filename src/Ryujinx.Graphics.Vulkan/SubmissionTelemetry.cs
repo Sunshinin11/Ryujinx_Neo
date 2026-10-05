@@ -1,3 +1,4 @@
+using Ryujinx.Common.Diagnostics;
 using Ryujinx.Common.Logging;
 using System;
 using System.Diagnostics;
@@ -30,6 +31,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         internal void Submitted(int count, long ticks, ulong value)
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             Interlocked.Increment(ref _calls);
             Interlocked.Add(ref _items, count);
             Interlocked.Add(ref _submitTicks, ticks);
@@ -40,6 +43,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         internal void Waited(long ticks, bool timeout)
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             Interlocked.Increment(ref _waits);
             Interlocked.Add(ref _waitTicks, ticks);
             if (timeout) Interlocked.Increment(ref _timeouts);
@@ -52,6 +57,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         internal void Presented(long ticks)
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             Interlocked.Increment(ref _presents);
             Interlocked.Add(ref _presentTicks, ticks);
             long now = Stopwatch.GetTimestamp();
@@ -70,6 +77,8 @@ namespace Ryujinx.Graphics.Vulkan
         private static double Milliseconds(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
         private void Log()
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             long now = Stopwatch.GetTimestamp();
             long last = Volatile.Read(ref _lastLog);
             if (now - last < Stopwatch.Frequency * 5 || Interlocked.CompareExchange(ref _lastLog, now, last) != last) return;

@@ -14,7 +14,7 @@ namespace Ryujinx.HLE.Utilities
         {
             FileStream file = File.OpenRead(path);
 
-            return OpenApplicationFileSystem(file, Path.GetExtension(path).ToLower() == ".xci", fileSystem, throwOnFailure);
+            return OpenApplicationFileSystem(file, NczSupport.IsXciExtension(Path.GetExtension(path)), fileSystem, throwOnFailure);
         }
 
         public static IFileSystem OpenApplicationFileSystem(Stream stream, bool isXci, VirtualFileSystem fileSystem, bool throwOnFailure = true)
@@ -41,6 +41,9 @@ namespace Ryujinx.HLE.Utilities
 
                 partitionFileSystem = pfsTemp;
             }
+
+            // NEOV2-NCZ1: NSZ/XCZ aparecem como NSP/XCI comuns.
+            partitionFileSystem = NczSupport.WrapIfCompressed(partitionFileSystem);
 
             fileSystem.ImportTickets(partitionFileSystem);
 

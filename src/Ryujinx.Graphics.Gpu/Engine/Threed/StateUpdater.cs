@@ -28,7 +28,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
         public const int RenderTargetStateIndex = 27;
 
         // Vertex buffers larger than this size will be clamped to the mapped size.
-        private const ulong VertexBufferSizeToMappedSizeThreshold = 256 * 1024 * 1024; // 256 MB
+        // NEOV2-COSMIC2: igual ao Eden (buffer_cache.h UpdateVertexBuffer, "size >= 64_MiB"):
+        // a partir de 64 MiB o tamanho e limitado ao trecho mapeado E fisicamente continuo.
+        private const ulong VertexBufferSizeToContiguousSizeThreshold = 64 * 1024 * 1024; // 64 MB
 
         private readonly GpuContext _context;
         private readonly GpuChannel _channel;
@@ -381,22 +383,19 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 {
                     BufferDescriptor sb = info.SBuffers[index];
 
+                    if (TextureArrayFeedback.IsFeedbackBuffer(sb))
+                    {
+                        // NEOV2-ARRAYFB1: host buffer, not guest memory.
+                        _channel.BufferManager.SetGraphicsTextureArrayFeedback(stage, sb.Slot);
+                        continue;
+                    }
+
                     ulong sbDescAddress = _channel.BufferManager.GetGraphicsUniformBufferAddress(stage, sb.SbCbSlot);
                     sbDescAddress += (ulong)sb.SbCbOffset * 4;
 
                     SbDescriptor sbDescriptor = _channel.MemoryManager.Physical.Read<SbDescriptor>(sbDescAddress);
 
-                    uint size;
-                    if (sb.SbCbSlot == Constants.DriverReservedUniformBuffer)
-                    {
-                        // Only trust the SbDescriptor size if it comes from slot 0.
-                        size = (uint)sbDescriptor.Size;
-                    }
-                    else
-                    {
-                        // TODO: Use full mapped size and somehow speed up buffer sync.
-                        size = (uint)_channel.MemoryManager.GetMappedSize(sbDescriptor.PackAddress(), Constants.MaxUnknownStorageSize);
-                    }
+                    uint size = NeoStorageBufferSize.FromDriverDescriptor(_channel.MemoryManager, sbDescriptor, stage, sb.SbCbSlot);
 
                     _channel.BufferManager.SetGraphicsStorageBuffer(stage, sb.Slot, sbDescriptor.PackAddress(), size, sb.Flags);
                 }
@@ -1135,8 +1134,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 GpuVa endAddress = vertexBufferEndAddressSpan[index];
 
                 ulong address = vertexBuffer.Address.Pack();
+                bool mapped = _channel.MemoryManager.IsMapped(address);
 
-                if (_channel.MemoryManager.IsMapped(address))
+                if (mapped)
                 {
                     vbEnableMask |= 1u << index;
                 }
@@ -1171,13 +1171,20 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
 
                         size = Math.Min(size, maxVertexBufferSize);
                     }
-                    else if (size > VertexBufferSizeToMappedSizeThreshold)
+                    else if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled ? size >= VertexBufferSizeToContiguousSizeThreshold : size > 256UL * 1024 * 1024)
                     {
                         // Make sure we have a sane vertex buffer size, since in some cases applications
                         // might set the "end address" of the vertex buffer to the end of the GPU address space,
                         // which would result in a several GBs large buffer.
+                        //
+                        // NEOV2-COSMIC2: antes usava GetMappedSize (so "mapeado") acima de 256 MB.
+                        // O buffer e criado a partir do endereco fisico da primeira pagina, entao
+                        // tudo depois da primeira descontinuidade fisica nunca foi dado valido deste
+                        // vertex buffer, e so gerava buffers gigantes (Marvel Cosmic Invasion: ~3 GB).
 
-                        size = _channel.MemoryManager.GetMappedSize(address, size);
+                        size = Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled
+                            ? _channel.MemoryManager.GetContiguousMappedSize(address, size)
+                            : _channel.MemoryManager.GetMappedSize(address, size);
                     }
                 }
                 else
@@ -1190,7 +1197,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                     size = Math.Min(vbSize, (ulong)((firstInstance + drawFirstVertex + drawVertexCount) * stride));
                 }
 
-                vertexBuffersSpan[index] = new BufferPipelineDescriptor(_channel.MemoryManager.IsMapped(address), stride, divisor);
+                vertexBuffersSpan[index] = new BufferPipelineDescriptor(mapped, stride, divisor);
                 _channel.BufferManager.SetVertexBuffer(index, address, size, stride, divisor);
             }
 
@@ -1463,16 +1470,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 ref _currentSpecState.GetPoolState(),
                 ref _currentSpecState.GetGraphicsState(),
                 addresses);
-
-            GraphicsCompatibility.RegisterMua3Program(
-                gs.HostProgram,
-                new Mua3ShaderIdentity(
-                    addresses.VertexA,
-                    addresses.VertexB,
-                    addresses.TessControl,
-                    addresses.TessEvaluation,
-                    addresses.Geometry,
-                    addresses.Fragment));
 
             // Consume the modified flag for spec state so that it isn't checked again.
             _currentSpecState.SetShader(gs);

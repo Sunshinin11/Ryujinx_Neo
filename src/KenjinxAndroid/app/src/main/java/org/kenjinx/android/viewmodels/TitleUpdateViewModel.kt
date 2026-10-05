@@ -68,7 +68,7 @@ class TitleUpdateViewModel(val titleId: String) {
                 if (requestCode == UpdateRequestCode) {
                     val file = files.firstOrNull()
                     file?.apply {
-                        if (file.extension == "nsp" || file.extension == "xci") {
+                        if (file.extension == "nsp" || file.extension == "xci" || file.extension == "nsz" || file.extension == "xcz") {
                             storageHelper.storage.context.contentResolver.takePersistableUriPermission(
                                 file.uri,
                                 Intent.FLAG_GRANT_READ_URI_PERMISSION

@@ -12,7 +12,7 @@ class PerformanceManager(private val activity: MainActivity) {
             // Hack for MIUI devices since they don't support the standard Android APIs
             try {
                 val setFpsIntent = Intent("com.miui.powerkeeper.SET_ACTIVITY_FPS").apply {
-                    putExtra("package_name", "org.kenjinx.android")
+                    putExtra("package_name", activity.packageName)
                     putExtra("isEnter", enable)
                 }
                 activity.sendBroadcast(setFpsIntent)

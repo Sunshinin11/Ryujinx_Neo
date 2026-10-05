@@ -51,22 +51,19 @@ namespace Ryujinx.Graphics.Gpu
         /// Title id of the current running game.
         /// Used by the shader cache.
         /// </summary>
-        private static string _titleId;
-
-        public static string TitleId
-        {
-            get => _titleId;
-            set
-            {
-                _titleId = value;
-                Ryujinx.Graphics.GAL.GraphicsCompatibility.TitleId = value;
-            }
-        }
+        public static string TitleId;
 
         /// <summary>
         /// Enables or disables the shader cache.
         /// </summary>
         public static bool EnableShaderCache;
+
+        /// <summary>
+        /// Limits shader loops to a finite per-invocation budget. This is a compatibility
+        /// workaround for malformed shaders and is disabled by default because legitimate
+        /// long-running loops can otherwise produce graphical corruption.
+        /// </summary>
+        public static bool EnableShaderLoopSafety;
 
         /// <summary>
         /// Enables or disables shader SPIR-V compilation.
@@ -82,6 +79,40 @@ namespace Ryujinx.Graphics.Gpu
         /// Enables or disables color space passthrough, if available.
         /// </summary>
         public static bool EnableColorSpacePassthrough = false;
+
+        /// <summary>
+        /// Executes vertex and geometry pipelines via Compute shaders when shaders require
+        /// semantics not properly preserved by native geometry stages.
+        /// </summary>
+        public static bool EnableVtgViaCompute = true;
+
+        /// <summary>
+        /// NEOV2 DMA-RELAX1: "Copia DMA relaxada". When enabled, DMA buffer copies whose source data is
+        /// already in guest memory stay on the GPU (the destination buffer is marked as GPU modified) instead of
+        /// also writing the destination on the CPU, which forces textures overlapping it to be downloaded from the
+        /// GPU first. Same trade-off Eden makes in BufferCache::DMACopy. Off by default; can cause stale data in
+        /// textures overlapping the copy destination.
+        /// </summary>
+        public static bool RelaxedDmaCopy;
+
+        /// <summary>
+        /// NEOV2-GPUMEM1: "Memoria de GPU estilo Eden". When enabled, the buffer and texture caches free unused
+        /// resources based on the real device memory usage, with the same thresholds Eden uses on integrated GPUs
+        /// (collect from 1.6 GiB, aggressive from 3.2 GiB), and Android low RAM forces aggressive collection.
+        /// </summary>
+        public static bool EdenGpuMemory;
+
+        /// <summary>
+        /// Rejects texture descriptors pointing to unmapped guest memory.
+        /// OFF by default globally in Current. Descriptor address 0 is always rejected regardless of this setting.
+        /// </summary>
+        public static bool RejectUnmappedTextureDescriptors;
+
+        /// <summary>
+        /// Enables asynchronous conversion and upload of large 3D textures (>= 4 MiB), like Eden's QueueAsyncUnswizzle.
+        /// ON by default.
+        /// </summary>
+        public static bool AsyncLarge3DTextureUpload = true;
     }
 #pragma warning restore CA2211
 }

@@ -47,7 +47,7 @@ class DlcViewModel(val titleId: String) {
                 if (requestCode == UpdateRequestCode) {
                     val file = files.firstOrNull()
                     file?.apply {
-                        if (file.extension == "nsp" || file.extension == "xci") {
+                        if (file.extension == "nsp" || file.extension == "xci" || file.extension == "nsz" || file.extension == "xcz") {
                             storageHelper.storage.context.contentResolver.takePersistableUriPermission(
                                 file.uri,
                                 Intent.FLAG_GRANT_READ_URI_PERMISSION
@@ -156,6 +156,10 @@ class DlcViewModel(val titleId: String) {
     private fun refreshDlcItems() {
         val items = mutableListOf<DlcItem>()
 
+        // NEOV2-UI1: mantem o estado ativado/desativado que o usuario ja mudou na tela (ainda nao salvo)
+        // quando a lista e recarregada (ao adicionar ou remover uma DLC).
+        val pendingStates = dlcItemsState?.associate { it.fullPath to it.isEnabled.value } ?: emptyMap()
+
         data?.apply {
             for (container in this) {
                 val containerPath = container.path
@@ -164,7 +168,7 @@ class DlcViewModel(val titleId: String) {
                     continue
 
                 for (dlc in container.dlc_nca_list) {
-                    val enabled = mutableStateOf(dlc.is_enabled)
+                    val enabled = mutableStateOf(pendingStates[dlc.path] ?: dlc.is_enabled)
                     items.add(
                         DlcItem(
                             File(containerPath).name,

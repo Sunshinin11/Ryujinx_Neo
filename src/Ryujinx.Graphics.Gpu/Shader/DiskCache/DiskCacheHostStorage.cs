@@ -22,7 +22,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
         private const ushort FileFormatVersionMajor = 1;
         private const ushort FileFormatVersionMinor = 2;
         private const uint FileFormatVersionPacked = ((uint)FileFormatVersionMajor << 16) | FileFormatVersionMinor;
-        private const uint CodeGenVersion = 7354;
+        private const uint CodeGenVersion = 7360; // NEOV2-GMEMFB1: NVN fallback accepts Eden and Ryujinx descriptor bases
 
         private const string SharedTocFileName = "shared.toc";
         private const string SharedDataFileName = "shared.data";

@@ -37,6 +37,12 @@ namespace Ryujinx.Graphics.Shader.Translation
         private bool IsTransformFeedbackEmulated => !GpuAccessor.QueryHostSupportsTransformFeedback() && GpuAccessor.QueryTransformFeedbackEnabled();
         public bool HasStore => _program.UsedFeatures.HasFlag(FeatureFlags.Store) || (IsTransformFeedbackEmulated && Definitions.LastInVertexPipeline);
 
+        /// <summary>
+        /// True when this is a geometry shader declared as passthrough on the shader program header.
+        /// Only this kind of geometry shader depends on the geometry shader passthrough extension.
+        /// </summary>
+        public bool GpPassthrough => Definitions.GpPassthrough;
+
         public bool LayerOutputWritten { get; private set; }
         public int LayerOutputAttribute { get; private set; }
 
@@ -365,6 +371,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 GpuAccessor.QueryHostSupportsShaderBarrierDivergence(),
                 GpuAccessor.QueryHostSupportsShaderFloat64(),
                 GpuAccessor.QueryHostSupportsShaderNonUniformIndexing(),
+                GpuAccessor.QueryShaderLoopSafetyEnabled(),
                 GpuAccessor.QueryHostSupportsTextureShadowLod(),
                 GpuAccessor.QueryHostSupportsViewportMask(),
                 GpuAccessor.QueryStorageImageExtendedFormats());

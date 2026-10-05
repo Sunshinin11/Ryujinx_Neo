@@ -38,7 +38,18 @@ interface KenjinxNativeJna : Library {
         enableMacroJit: Boolean = false,
         enableMacroHLE: Boolean = true,
         enableShaderCache: Boolean = true,
+        enableShaderLoopSafety: Boolean = false,
         enableTextureRecompression: Boolean = false,
+        enableVtgViaCompute: Boolean = true,
+        drawFlushMode: Int = 0,
+        drawFlushGlobalMode: Int = 0,
+        drawFlushGameOverride: Int = -1,
+        bufferReadbackMode: Int = 0,
+        bufferReadbackGlobalMode: Int = 0,
+        bufferReadbackGameOverride: Int = -1,
+        strictSyncMode: Int = 0,
+        strictSyncGlobalMode: Int = 0,
+        strictSyncGameOverride: Int = -1,
         backendThreading: Int = BackendThreading.Auto.ordinal
     ): Boolean
 
@@ -58,6 +69,43 @@ interface KenjinxNativeJna : Library {
     fun graphicsRendererSetVsync(vSyncMode: Int)
     fun graphicsRendererRunLoop()
     fun graphicsSetFullscreenStretch(enable: Boolean)
+    fun deviceSetNceTrackingProtection(enable: Boolean)
+    fun deviceSetRelaxedDmaCopy(enable: Boolean)
+    // NEOV2-GPUMEM1: memoria de GPU estilo Eden (coleta de buffers/texturas + protecao contra falta de RAM).
+    fun deviceSetEdenGpuMemory(enable: Boolean)
+    fun deviceSetVp9FFmpeg(enable: Boolean)
+    fun deviceSetAudioBoost(gain: Float)
+    // NEOV2-NCZ2: conversor NSP -> NSZ (0 ok, 1 erro, 2 cancelado; progresso em milesimos; fase 1 comprimindo, 2 verificando).
+    fun deviceCompressNsp(inDescriptor: Int, outDescriptor: Int, level: Int): Int
+    fun deviceCompressProgress(): Int
+    fun deviceCompressPhase(): Int
+    fun deviceCompressCancel()
+
+    fun deviceDecompressSize(inDescriptor: Int, standalone: Int): Long
+    fun deviceDecompress(inDescriptor: Int, outDescriptor: Int, standalone: Int, sourceName: String): Int
+    fun deviceDecompressProgress(): Int
+    fun deviceDecompressPhase(): Int
+    fun deviceDecompressCancel()
+
+    fun deviceOptimizeNszSize(inDescriptor: Int): Long
+    fun deviceOptimizeNsz(inDescriptor: Int, outDescriptor: Int): Int
+    fun deviceOptimizeNszProgress(): Int
+    fun deviceOptimizeNszPhase(): Int
+    fun deviceOptimizeNszCancel()
+    fun deviceSetExperimentalGameFixes(enable: Boolean)
+    fun deviceSetNifmOffline(enable: Boolean)
+    fun deviceSetWebOfflineTerms(enable: Boolean)
+    fun deviceSetRejectUnmappedDescriptors(enable: Boolean)
+    fun deviceSetAsyncLarge3DTextureUpload(enable: Boolean)
+    // Opcao por jogo "Otimizacoes de GPU".
+    fun deviceSetTurnipFence(enable: Boolean)
+    fun deviceSetConditionalRenderNoWait(enable: Boolean)
+    fun deviceSetCommandFetchNoFlush(enable: Boolean)
+    fun deviceSetTexelBufferExactOffset(enable: Boolean)
+    fun deviceSetQueueHysteresis(enable: Boolean)
+    fun deviceSetTimelineLazy(enable: Boolean)
+    fun deviceSetStagingBufferLock(enable: Boolean)
+    fun deviceSetTexturePoolKeepInvalid(enable: Boolean)
     fun deviceReloadFilesystem()
     fun inputInitialize(width: Int, height: Int)
     fun inputSetClientSize(width: Int, height: Int)
@@ -172,7 +220,18 @@ object KenjinxNative : KenjinxNativeJna by jnaInstance {
         enableMacroJit: Boolean,
         enableMacroHLE: Boolean,
         enableShaderCache: Boolean,
+        enableShaderLoopSafety: Boolean,
         enableTextureRecompression: Boolean,
+        enableVtgViaCompute: Boolean,
+        drawFlushMode: Int,
+        drawFlushGlobalMode: Int,
+        drawFlushGameOverride: Int,
+        bufferReadbackMode: Int,
+        bufferReadbackGlobalMode: Int,
+        bufferReadbackGameOverride: Int,
+        strictSyncMode: Int,
+        strictSyncGlobalMode: Int,
+        strictSyncGameOverride: Int,
         backendThreading: Int
     ): Boolean {
         val requested = backendThreading
@@ -197,7 +256,18 @@ object KenjinxNative : KenjinxNativeJna by jnaInstance {
                 enableMacroJit,
                 enableMacroHLE,
                 enableShaderCache,
+                enableShaderLoopSafety,
                 enableTextureRecompression,
+                enableVtgViaCompute,
+                drawFlushMode,
+                drawFlushGlobalMode,
+                drawFlushGameOverride,
+                bufferReadbackMode,
+                bufferReadbackGlobalMode,
+                bufferReadbackGameOverride,
+                strictSyncMode,
+                strictSyncGlobalMode,
+                strictSyncGameOverride,
                 firstChoice
             )
         } catch (t: Throwable) {
@@ -215,7 +285,18 @@ object KenjinxNative : KenjinxNativeJna by jnaInstance {
                     enableMacroJit,
                     enableMacroHLE,
                     enableShaderCache,
+                    enableShaderLoopSafety,
                     enableTextureRecompression,
+                    enableVtgViaCompute,
+                    drawFlushMode,
+                    drawFlushGlobalMode,
+                    drawFlushGameOverride,
+                    bufferReadbackMode,
+                    bufferReadbackGlobalMode,
+                    bufferReadbackGameOverride,
+                    strictSyncMode,
+                    strictSyncGlobalMode,
+                    strictSyncGameOverride,
                     THREADING_SINGLE
                 )
             } catch (t2: Throwable) {
@@ -243,6 +324,30 @@ object KenjinxNative : KenjinxNativeJna by jnaInstance {
 
     @JvmStatic
     fun test() { /* no-op */ }
+
+    // NEOV2-GPUMEM1: chamado pelo nativo quando a RAM do Android fica critica durante o jogo.
+    // Sai do jogo pelo caminho normal (como o botao Sair) para o aparelho nao travar.
+    @JvmStatic
+    fun onHostLowMemory() {
+        val vm = MainActivity.mainViewModel ?: return
+        val expectedHost = vm.gameHost
+        vm.activity.runOnUiThread {
+            if (vm.gameHost !== expectedHost || !vm.activity.isGameRunning) return@runOnUiThread
+            try {
+                android.widget.Toast.makeText(
+                    vm.activity,
+                    "Memória insuficiente: o jogo foi fechado para o aparelho não travar.",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            } catch (_: Throwable) {
+            }
+            try {
+                vm.requestGameExit()
+            } catch (t: Throwable) {
+                Log.e("KenjinxNative", "onHostLowMemory exit failed", t)
+            }
+        }
+    }
 
     @JvmStatic
     fun getSurfacePtr(): Long = MainActivity.mainViewModel?.gameHost?.currentSurface ?: -1

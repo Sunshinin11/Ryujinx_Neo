@@ -1,3 +1,4 @@
+using Ryujinx.Common.Diagnostics;
 using Ryujinx.Common;
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
@@ -196,7 +197,7 @@ namespace Ryujinx.Graphics.Vulkan
 
                 InitialTransition(ImageLayout.Undefined, ImageLayout.General);
 
-                _telemetryTracked = true;
+                _telemetryTracked = GezinjinxPerformanceMode.DetailedTelemetry;
                 TextureFormatTelemetry.RecordStorageCreated((long)_size);
             }
             else

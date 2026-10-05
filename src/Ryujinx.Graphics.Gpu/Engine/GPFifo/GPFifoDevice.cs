@@ -1,3 +1,5 @@
+using Ryujinx.Common.Diagnostics;
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.Gpu.Memory;
 using System;
 using System.Collections.Concurrent;
@@ -59,7 +61,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
             /// <returns>The fetched data</returns>
             private readonly ReadOnlySpan<int> GetWords(MemoryManager memoryManager, bool flush)
             {
-                return MemoryMarshal.Cast<byte, int>(memoryManager.GetSpan(EntryAddress, (int)EntryCount * 4, flush));
+                // NEOV2 CMDFETCH1: command lists are written by the guest CPU, so they are read without a tracked
+                // read. A tracked read here flushes any GPU written buffer that shares a 4 KiB page with the command
+                // list, and waits for the GPU to finish before the GPU thread can continue. Eden reads command lists
+                // the same way by default (UnsafeRead in dma_pusher.cpp unless GPU accuracy is High).
+                return MemoryMarshal.Cast<byte, int>(memoryManager.GetSpan(EntryAddress, (int)EntryCount * 4, flush && !CommandFetchWithoutFlush));
             }
 
             /// <summary>
@@ -83,6 +89,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
             }
         }
 
+        /// <summary>
+        /// NEOV2 CMDFETCH1: GPFIFO command lists are fetched without flushing GPU written data.
+        /// </summary>
+        private static bool CommandFetchWithoutFlush => NeoGraphicsSettings.CommandFetchWithoutFlushEnabled;
+
         private readonly ConcurrentQueue<CommandBuffer> _commandBufferQueue;
 
         private GPFifoProcessor _prevChannelProcessor;
@@ -104,6 +115,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
             _ibEnable = true;
             _context = context;
             _event = new AutoResetEvent(false);
+
+            Logger.Info?.Print(LogClass.Gpu, "[NEOV2-CMDFETCH1] GPFIFO command lists are fetched without flushing GPU written data");
         }
 
         /// <summary>
@@ -122,6 +135,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         /// <param name="commandBuffer">The command buffer containing the prefetched commands</param>
         internal void PushHostCommandBuffer(GPFifoProcessor processor, int[] commandBuffer)
         {
+            GezinjinxGuestStallTelemetry.RecordGpfifoEnqueue(ulong.MaxValue, commandBuffer.Length);
+
             _commandBufferQueue.Enqueue(new CommandBuffer
             {
                 Processor = processor,
@@ -184,6 +199,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
                     beforeBarrier = false;
                 }
 
+                GezinjinxGuestStallTelemetry.RecordGpfifoEnqueue(commandBuffer.EntryAddress, (int)commandBuffer.EntryCount);
                 _commandBufferQueue.Enqueue(commandBuffer);
             }
         }
@@ -208,6 +224,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
             // Process command buffers.
             while (_ibEnable && !_interrupt && _commandBufferQueue.TryDequeue(out CommandBuffer entry))
             {
+                GezinjinxGuestStallTelemetry.RecordGpfifoDequeue(entry.EntryAddress, (int)entry.EntryCount);
                 bool flushCommandBuffer = true;
 
                 if (_flushSkips != 0)

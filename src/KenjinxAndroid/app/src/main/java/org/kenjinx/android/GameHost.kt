@@ -302,6 +302,9 @@ class GameHost(context: Context?, private val mainViewModel: MainViewModel) : Su
     }
 
     fun close() {
+        // NEOV2-CLOSE1: cada GameHost fecha uma unica vez (evita stopEmulation/CloseEmulation duplicados).
+        if (_isClosed) return
+
         ghLog("close()")
         _isClosed = true
         _isInit = false

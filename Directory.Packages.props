@@ -38,6 +38,7 @@
     <PackageVersion Include="Ryujinx.Graphics.Nvdec.Dependencies.Windows" Version="6.1.3-build5" />
     <PackageVersion Include="Ryujinx.Graphics.Vulkan.Dependencies.MoltenVK" Version="1.2.0" />
     <PackageVersion Include="Ryujinx.LibHac" Version="0.21.0-alpha.128" />
+    <PackageVersion Include="ZstdSharp.Port" Version="0.8.1" />
     <PackageVersion Include="Ryujinx.SDL3-CS" Version="2026.707.0" />
     <PackageVersion Include="securifybv.ShellLink" Version="0.1.0" />
     <PackageVersion Include="SharpZipLib" Version="1.4.2" />

@@ -18,6 +18,7 @@ namespace Ryujinx.Graphics.Vulkan
         public DescriptorSetLayout[] DescriptorSetLayouts { get; }
         public bool[] DescriptorSetLayoutsUpdateAfterBind { get; }
         public PipelineLayout PipelineLayout { get; }
+        public bool UseDynamicUniformBuffers { get; }
 
         private readonly int[] _consumedDescriptorsPerSet;
         private readonly DescriptorPoolSize[][] _poolSizes;
@@ -99,7 +100,29 @@ namespace Ryujinx.Graphics.Vulkan
             ReadOnlyCollection<ResourceDescriptorCollection> setDescriptors,
             bool usePushDescriptors) : this(gd, device, setDescriptors.Count)
         {
-            ResourceLayouts layouts = PipelineLayoutFactory.Create(gd, device, setDescriptors, usePushDescriptors);
+            int uniformDescriptorCount = 0;
+
+            if (setDescriptors.Count > PipelineBase.UniformSetIndex)
+            {
+                foreach (ResourceDescriptor descriptor in setDescriptors[PipelineBase.UniformSetIndex].Descriptors)
+                {
+                    if (descriptor.Type == ResourceType.UniformBuffer)
+                    {
+                        uniformDescriptorCount += descriptor.Count;
+                    }
+                }
+            }
+
+            UseDynamicUniformBuffers = !usePushDescriptors &&
+                uniformDescriptorCount > 0 &&
+                uniformDescriptorCount <= gd.MaxDynamicUniformBuffers;
+
+            ResourceLayouts layouts = PipelineLayoutFactory.Create(
+                gd,
+                device,
+                setDescriptors,
+                usePushDescriptors,
+                UseDynamicUniformBuffers);
 
             DescriptorSetLayouts = layouts.DescriptorSetLayouts;
             DescriptorSetLayoutsUpdateAfterBind = layouts.DescriptorSetLayoutsUpdateAfterBind;
@@ -120,7 +143,11 @@ namespace Ryujinx.Graphics.Vulkan
                 }
 
                 _consumedDescriptorsPerSet[setIndex] = count;
-                _poolSizes[setIndex] = GetDescriptorPoolSizes(poolSizes, setDescriptors[setIndex], DescriptorSetManager.MaxSets).ToArray();
+                _poolSizes[setIndex] = GetDescriptorPoolSizes(
+                    poolSizes,
+                    setDescriptors[setIndex],
+                    DescriptorSetManager.MaxSets,
+                    UseDynamicUniformBuffers && setIndex == PipelineBase.UniformSetIndex).ToArray();
             }
 
             if (usePushDescriptors)
@@ -264,14 +291,20 @@ namespace Ryujinx.Graphics.Vulkan
             }
         }
 
-        private static Span<DescriptorPoolSize> GetDescriptorPoolSizes(Span<DescriptorPoolSize> output, ResourceDescriptorCollection setDescriptor, uint multiplier)
+        private static Span<DescriptorPoolSize> GetDescriptorPoolSizes(
+            Span<DescriptorPoolSize> output,
+            ResourceDescriptorCollection setDescriptor,
+            uint multiplier,
+            bool dynamicUniformBuffers)
         {
             int count = 0;
 
             for (int index = 0; index < setDescriptor.Descriptors.Count; index++)
             {
                 ResourceDescriptor descriptor = setDescriptor.Descriptors[index];
-                DescriptorType descriptorType = descriptor.Type.Convert();
+                DescriptorType descriptorType = dynamicUniformBuffers && descriptor.Type == ResourceType.UniformBuffer
+                    ? DescriptorType.UniformBufferDynamic
+                    : descriptor.Type.Convert();
 
                 bool found = false;
 

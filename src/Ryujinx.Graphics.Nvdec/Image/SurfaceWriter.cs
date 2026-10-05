@@ -4,7 +4,9 @@ using Ryujinx.Graphics.Texture;
 using Ryujinx.Graphics.Video;
 using Ryujinx.Memory;
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 using static Ryujinx.Graphics.Nvdec.Image.SurfaceCommon;
 using static Ryujinx.Graphics.Nvdec.MemoryExtensions;
@@ -103,7 +105,9 @@ namespace Ryujinx.Graphics.Nvdec.Image
         {
             OffsetCalculator calc = new(width, height, 0, false, 2, 2);
 
-            if (Sse2.IsSupported)
+            // NEOV2-VP9SIMD2: no ARM64 usa o mesmo caminho vetorial do x86 (ZIP1/ZIP2 no lugar de
+            // PUNPCKLBW/PUNPCKHBW). O resultado e identico; antes o ARM caia no laco byte a byte.
+            if (Sse2.IsSupported || AdvSimd.Arm64.IsSupported)
             {
                 int strideTrunc64 = BitUtils.AlignDown(width * 2, 64);
 
@@ -130,10 +134,10 @@ namespace Ryujinx.Graphics.Nvdec.Image
                             Vector128<byte> value3 = *(Vector128<byte>*)(inUPtr + 16);
                             Vector128<byte> value4 = *(Vector128<byte>*)(inVPtr + 16);
 
-                            Vector128<byte> uv0 = Sse2.UnpackLow(value, value2);
-                            Vector128<byte> uv1 = Sse2.UnpackHigh(value, value2);
-                            Vector128<byte> uv2 = Sse2.UnpackLow(value3, value4);
-                            Vector128<byte> uv3 = Sse2.UnpackHigh(value3, value4);
+                            Vector128<byte> uv0 = InterleaveLow(value, value2);
+                            Vector128<byte> uv1 = InterleaveHigh(value, value2);
+                            Vector128<byte> uv2 = InterleaveLow(value3, value4);
+                            Vector128<byte> uv3 = InterleaveHigh(value3, value4);
 
                             *(Vector128<byte>*)offset = uv0;
                             *(Vector128<byte>*)offset2 = uv1;
@@ -171,6 +175,18 @@ namespace Ryujinx.Graphics.Nvdec.Image
                     }
                 }
             }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Vector128<byte> InterleaveLow(Vector128<byte> u, Vector128<byte> v)
+        {
+            return Sse2.IsSupported ? Sse2.UnpackLow(u, v) : AdvSimd.Arm64.ZipLow(u, v);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Vector128<byte> InterleaveHigh(Vector128<byte> u, Vector128<byte> v)
+        {
+            return Sse2.IsSupported ? Sse2.UnpackHigh(u, v) : AdvSimd.Arm64.ZipHigh(u, v);
         }
     }
 }

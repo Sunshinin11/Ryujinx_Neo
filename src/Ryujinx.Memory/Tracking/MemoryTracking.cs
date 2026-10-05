@@ -101,6 +101,35 @@ namespace Ryujinx.Memory.Tracking
         }
 
         /// <summary>
+        /// NEOV2 NCE-PROT1: re-applies the tracking protection of guest regions in a range, after the guest memory
+        /// permission of that range was changed on the host pages (for example by IPC buffer or memory permission
+        /// changes). Without this, pages the GPU is tracking lose their protection, and CPU accesses to them are no
+        /// longer seen. Eden does the same by never changing the protection of pages the GPU caches.
+        /// </summary>
+        /// <param name="va">Virtual memory address</param>
+        /// <param name="size">Size of the range</param>
+        /// <returns>True if at least one region had its protection applied again</returns>
+        public bool RestoreGuestProtection(ulong va, ulong size)
+        {
+            bool restored = false;
+
+            lock (TrackingLock)
+            {
+                _guestVirtualRegions.Lock.EnterReadLock();
+                ReadOnlySpan<VirtualRegion> overlaps = _guestVirtualRegions.FindOverlapsAsSpan(va, size);
+
+                for (int i = 0; i < overlaps.Length; i++)
+                {
+                    restored |= overlaps[i].RestoreProtectionAfterExternalChange();
+                }
+
+                _guestVirtualRegions.Lock.ExitReadLock();
+            }
+
+            return restored;
+        }
+
+        /// <summary>
         /// Indicate that a virtual region has been unmapped.
         /// Should be called before the unmapping is complete.
         /// </summary>

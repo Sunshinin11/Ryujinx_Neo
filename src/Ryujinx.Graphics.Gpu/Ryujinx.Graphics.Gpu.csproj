@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);RYUJINX_GPFIFO_TELEMETRY</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>

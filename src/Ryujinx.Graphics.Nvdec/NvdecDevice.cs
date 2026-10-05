@@ -71,7 +71,7 @@ namespace Ryujinx.Graphics.Nvdec
                     Vp8Decoder.Decode(_currentContext, _rm, ref _state.State);
                     break;
                 case ApplicationId.Vp9:
-                    Vp9Decoder.Decode(_rm, ref _state.State);
+                    Vp9Decoder.Decode(_currentContext, _rm, ref _state.State);
                     break;
                 default:
                     Logger.Error?.Print(LogClass.Nvdec, $"Unsupported codec \"{applicationId}\".");

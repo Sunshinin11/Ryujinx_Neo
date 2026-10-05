@@ -16,6 +16,27 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
     static class SpirvGenerator
     {
+        // NEOV2: prevent a malformed guest shader from keeping the host GPU in an infinite loop.
+        private const uint LoopSafetyIterations = 0x2000;
+
+        private static SpvInstruction AddLoopSafetyCheck(CodeGenContext context, SpvInstruction condition)
+        {
+            SpvInstruction counterType = context.TypeU32();
+            SpvInstruction counterPointerType = context.TypePointer(StorageClass.Private, counterType);
+            SpvInstruction counter = context.Variable(counterPointerType, StorageClass.Private, context.Constant(counterType, LoopSafetyIterations));
+            context.AddGlobalVariable(counter);
+
+            SpvInstruction oldValue = context.Load(counterType, counter);
+            SpvInstruction newValue = context.ISub(counterType, oldValue, context.Constant(counterType, 1u));
+            context.Store(counter, newValue);
+
+            // Match Eden exactly: the per-invocation budget is not reset when a nested loop
+            // is entered again, so repeated re-entry cannot turn into an unbounded workload.
+            SpvInstruction withinLimit = context.SGreaterThanEqual(context.TypeBool(), newValue, context.Constant(counterType, 0u));
+
+            return context.LogicalAnd(context.TypeBool(), condition, withinLimit);
+        }
+
         // Resource pools for Spirv generation. Note: Increase count when more threads are being used.
         private const int GeneratorPoolCount = 1;
         private static readonly ObjectPool<SpvInstructionPool> _instructionPool;
@@ -368,6 +389,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                         context.AddLabel(continueTarget);
 
                         SpvInstruction condition = context.Get(AggregateType.Bool, e.Block.Condition);
+
+                        if (context.HostCapabilities.EnableShaderLoopSafety)
+                        {
+                            condition = AddLoopSafetyCheck(context, condition);
+                        }
 
                         context.BranchConditional(condition, loopTarget, context.GetNextLabel(mergeBlock));
                     }

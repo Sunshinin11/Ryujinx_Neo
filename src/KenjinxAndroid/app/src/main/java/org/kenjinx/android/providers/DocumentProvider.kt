@@ -18,7 +18,7 @@ import java.io.IOException
 
 class DocumentProvider : DocumentsProvider() {
     private val baseDirectory = File(KenjinxApplication.instance.getPublicFilesDir().canonicalPath)
-    private val applicationName = "Kenji-NX"
+    private val applicationName = "Ryujinx Neo"
 
     companion object {
         private val DEFAULT_ROOT_PROJECTION: Array<String> = arrayOf(

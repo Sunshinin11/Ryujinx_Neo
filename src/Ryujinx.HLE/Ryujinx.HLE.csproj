@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <PackageReference Include="Ryujinx.LibHac" />
+    <PackageReference Include="ZstdSharp.Port" />
     <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" />
     <PackageReference Include="MsgPack.Cli" />
     <PackageReference Include="SkiaSharp" />

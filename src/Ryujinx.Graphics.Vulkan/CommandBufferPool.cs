@@ -263,8 +263,6 @@ namespace Ryujinx.Graphics.Vulkan
 
                         _api.BeginCommandBuffer(entry.CommandBuffer, in commandBufferBeginInfo).ThrowOnError();
 
-                        Mua3CrashTelemetry.BeginCommandBuffer(entry.CommandBuffer, cursor);
-
                         return new CommandBufferScoped(this, entry.CommandBuffer, cursor);
                     }
 

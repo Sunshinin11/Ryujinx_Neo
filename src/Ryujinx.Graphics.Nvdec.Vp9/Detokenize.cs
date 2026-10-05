@@ -57,8 +57,9 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
             uint range = r.Range;
             int count = r.Count;
             
-            ReadOnlySpan<Array6<Array4<uint>>> coefSpan = counts.Coef[(int)txSize][(int)type][refr].AsSpan();
-            ReadOnlySpan<Array6<uint>> eobBranchSpan = counts.EobBranch[(int)txSize][(int)type][refr].AsSpan();
+            // NEOV2-VP9COEFSPAN: Span (nao ReadOnlySpan) para os incrementos chegarem aos contadores reais.
+            Span<Array6<Array4<uint>>> coefSpan = counts.Coef[(int)txSize][(int)type][refr].AsSpan();
+            Span<Array6<uint>> eobBranchSpan = counts.EobBranch[(int)txSize][(int)type][refr].AsSpan();
 
             while (c < maxEob)
             {

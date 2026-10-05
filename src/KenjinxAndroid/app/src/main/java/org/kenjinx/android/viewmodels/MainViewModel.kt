@@ -1,5 +1,7 @@
 package org.kenjinx.android.viewmodels
 
+import org.kenjinx.android.driver.DriverPreparationManager
+
 import android.annotation.SuppressLint
 import android.net.Uri
 import android.os.SystemClock
@@ -50,7 +52,6 @@ class MainViewModel(val activity: MainActivity) {
     private var fifoState: MutableState<Double>? = null
     private var usedMemState: MutableState<Int>? = null
     private var totalMemState: MutableState<Int>? = null
-    private var frequenciesState: MutableList<Double>? = null
     private var progress: MutableState<String>? = null
     private var progressValue: MutableState<Float>? = null
     private var showLoading: MutableState<Boolean>? = null
@@ -58,6 +59,8 @@ class MainViewModel(val activity: MainActivity) {
     @Volatile var rendererReady: Boolean = false
     @Volatile var emulationRunning: Boolean = false
     @Volatile var emulationClosing: Boolean = false
+    val gameExitRequested: MutableState<Boolean> = mutableStateOf(false)
+    private var gameExitGeneration = 0L
 
     // Default Game Folder
     var defaultGameFolderUri: Uri? = null
@@ -89,7 +92,35 @@ class MainViewModel(val activity: MainActivity) {
         firmwareVersion = KenjinxNative.deviceGetInstalledFirmwareVersion()
     }
 
+    // UI-thread entry shared by the dialog and the hotkey. The claim lasts until the next game screen.
+    fun requestGameExit(): Boolean {
+        val nav = navController ?: return false
+        if (nav.currentDestination?.route != "game" || gameExitRequested.value) return false
+
+        gameExitRequested.value = true
+        val generation = gameExitGeneration
+        // Let Compose remove the exit controls before closeGame's existing joins can block the UI.
+        // Allow an intervening frame without moving teardown to a new thread.
+        activity.window.decorView.postOnAnimation {
+            activity.window.decorView.postOnAnimation finishExit@{
+                if (generation != gameExitGeneration || nav.currentDestination?.route != "game") return@finishExit
+                try {
+                    closeGame()
+                    // NEOV2-CLOSE2 remains: never pop the library from a repeated/stale exit.
+                    if (nav.currentDestination?.route == "game") nav.popBackStack()
+                    activity.isGameRunning = false
+                } catch (error: Exception) {
+                    Log.e("MainViewModel", "Game exit failed; duplicate exit remains blocked.", error)
+                }
+            }
+        }
+        return true
+    }
+
     fun closeGame() {
+        // NEOV2-CLOSE1: ignora um segundo pedido enquanto o fechamento anterior ainda esta em andamento.
+        if (emulationClosing && emulationRunning) return
+
         emulationClosing = true
         KenjinxNative.deviceSignalEmulationClose()
         gameHost?.close()
@@ -135,13 +166,38 @@ class MainViewModel(val activity: MainActivity) {
     private fun loadSystemLanguage(): SystemLanguage {
         val prefs = PreferenceManager.getDefaultSharedPreferences(activity)
         val stored = prefs.getString("system_language", "AmericanEnglish") ?: "AmericanEnglish"
-        return runCatching { SystemLanguage.valueOf(stored) }.getOrElse { SystemLanguage.AmericanEnglish }
+        val global = runCatching { SystemLanguage.valueOf(stored) }.getOrElse { SystemLanguage.AmericanEnglish }
+        val titleId = gameModel?.titleId.orEmpty()
+        return if (titleId.isBlank()) global else GameSettingsStore(activity, titleId).resolveLanguage(global)
     }
 
     private fun loadRegionCode(): RegionCode {
         val prefs = PreferenceManager.getDefaultSharedPreferences(activity)
         val stored = prefs.getString("region_code", "USA") ?: "USA"
         return runCatching { RegionCode.valueOf(stored) }.getOrElse { RegionCode.USA }
+    }
+
+    fun getSettingsForGame(game: GameModel? = gameModel): QuickSettings {
+        val settings = QuickSettings(activity)
+        val titleId = game?.titleId.orEmpty()
+        if (titleId.isNotBlank()) {
+            GameSettingsStore(activity, titleId).applyTo(settings)
+        }
+        return settings
+    }
+
+    fun updateActiveGameSettings(update: (QuickSettings) -> Unit) {
+        val settings = getSettingsForGame()
+        update(settings)
+        val titleId = gameModel?.titleId.orEmpty()
+        if (titleId.isNotBlank()) {
+            val store = GameSettingsStore(activity, titleId)
+            if (store.isEnabled) {
+                store.save(settings)
+                return
+            }
+        }
+        settings.save()
     }
     // -------------------------------------------------------------------------------
 
@@ -151,6 +207,13 @@ class MainViewModel(val activity: MainActivity) {
                 return 0
             }
         }
+
+        // Opcoes por jogo "Compatibilidade grafica 2D" (MARVEL Cosmic Invasion) e "Modo sem internet" (DOOM 2016).
+        val experimentalStore = GameSettingsStore(activity, game.titleId.orEmpty())
+        KenjinxNative.deviceSetExperimentalGameFixes(experimentalStore.isEnabled && experimentalStore.experimentalGameFixesEnabled)
+        KenjinxNative.deviceSetNifmOffline(experimentalStore.isEnabled && experimentalStore.nifmOfflineEnabled)
+        // Opcao por jogo "Termos offline" (BioShock).
+        KenjinxNative.deviceSetWebOfflineTerms(experimentalStore.isEnabled && experimentalStore.webOfflineTermsEnabled)
 
         KenjinxNative.deviceReinitEmulation()
         MainActivity.mainViewModel?.activity?.uiHandler = UiHandler()
@@ -170,7 +233,7 @@ class MainViewModel(val activity: MainActivity) {
         gameModel = game
         isMiiEditorLaunched = false
 
-        val settings = QuickSettings(activity)
+        val settings = getSettingsForGame(game)
 
         if(overrideSettings == true)
         {
@@ -180,10 +243,117 @@ class MainViewModel(val activity: MainActivity) {
         // 0=Auto, 1=SingleThread, 2=Threaded
         val backendMode = if (settings.disableThreadedRendering) 1 else 2
 
+        // NEOV2 AUTOFLUSH1: valor efetivo ja resolvido por getSettingsForGame (global + override).
+        // Global e override crus vao junto apenas para a linha de log [NEOV2-DRAW-FLUSH].
+        val drawFlushGlobal = QuickSettings(activity).drawFlushMode
+        val drawFlushStore = GameSettingsStore(activity, game.titleId.orEmpty())
+        val drawFlushOverride =
+            if (drawFlushStore.isEnabled && drawFlushStore.drawFlushMode > 0) {
+                drawFlushStore.drawFlushMode - 1
+            } else {
+                -1
+            }
+
+        // NEOV2 BUFFER-READBACK1: mesma resolucao, global cru e override cru apenas para o log.
+        val strictSyncGlobal = QuickSettings(activity).strictSyncMode
+        val strictSyncOverride =
+            if (drawFlushStore.isEnabled && drawFlushStore.strictSyncMode > 0) {
+                drawFlushStore.strictSyncMode - 1
+            } else {
+                -1
+            }
+
+        val bufferReadbackGlobal = QuickSettings(activity).bufferReadbackMode
+        val bufferReadbackOverride =
+            if (drawFlushStore.isEnabled && drawFlushStore.bufferReadbackMode > 0) {
+                drawFlushStore.bufferReadbackMode - 1
+            } else {
+                -1
+            }
+
+        // NEOV2 NCE-PROT1: valor efetivo ja resolvido por getSettingsForGame (global + override por jogo).
+        try {
+            KenjinxNative.deviceSetNceTrackingProtection(settings.enableNceTrackingProtection)
+        } catch (_: Throwable) {
+        }
+
+        // NEOV2 DMA-RELAX1: valor efetivo (global + override por jogo).
+        try {
+            KenjinxNative.deviceSetRelaxedDmaCopy(settings.enableRelaxedDmaCopy)
+        } catch (_: Throwable) {
+        }
+        // NEOV2-GPUMEM1: memoria de GPU estilo Eden, valor efetivo (global + override por jogo).
+        try {
+            KenjinxNative.deviceSetEdenGpuMemory(settings.enableEdenGpuMemory)
+        } catch (_: Throwable) {
+        }
+        // NEOV2-VP9EDEN1: VP9 pelo FFmpeg (chave geral).
+        try {
+            KenjinxNative.deviceSetVp9FFmpeg(settings.enableVp9FFmpeg)
+        } catch (_: Throwable) {
+        }
+        // NEOV2-AUDIO1: amplificacao do audio (100% a 200%).
+        try {
+            KenjinxNative.deviceSetAudioBoost(settings.audioBoost)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetRejectUnmappedDescriptors(settings.enableRejectUnmappedDescriptors)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetAsyncLarge3DTextureUpload(settings.enableAsyncLarge3DUpload)
+        } catch (_: Throwable) {
+        }
+        // Opcao "Otimizacoes de GPU", antes de criar o renderer. TEXBUF-ALIGN1 e correcao e fica sempre ligado.
+        try {
+            KenjinxNative.deviceSetTurnipFence(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetConditionalRenderNoWait(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetCommandFetchNoFlush(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetTexelBufferExactOffset(true)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetQueueHysteresis(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetTimelineLazy(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetStagingBufferLock(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetTexturePoolKeepInvalid(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+
         var success = KenjinxNative.graphicsInitialize(
             enableMacroHLE = settings.enableMacroHLE,
             enableShaderCache = settings.enableShaderCache,
+            enableShaderLoopSafety = settings.enableShaderLoopSafety,
             enableTextureRecompression = settings.enableTextureRecompression,
+            enableVtgViaCompute = settings.enableVtgViaCompute,
+            drawFlushMode = settings.drawFlushMode,
+            drawFlushGlobalMode = drawFlushGlobal,
+            drawFlushGameOverride = drawFlushOverride,
+            bufferReadbackMode = settings.bufferReadbackMode,
+            bufferReadbackGlobalMode = bufferReadbackGlobal,
+            bufferReadbackGameOverride = bufferReadbackOverride,
+            strictSyncMode = settings.strictSyncMode,
+            strictSyncGlobalMode = strictSyncGlobal,
+            strictSyncGameOverride = strictSyncOverride,
             rescale = settings.resScale,
             maxAnisotropy = settings.maxAnisotropy,
             backendThreading = backendMode
@@ -201,38 +371,25 @@ class MainViewModel(val activity: MainActivity) {
 
         val driverViewModel = VulkanDriverViewModel(activity)
         val drivers = driverViewModel.getAvailableDrivers()
-        var driverHandle = 0L
+        val gameDriver = GameSettingsStore(activity, game.titleId.orEmpty())
+        val selectedDriverPath = when {
+            // Per game "Driver do sistema": an empty path loads the system Vulkan driver.
+            gameDriver.isEnabled &&
+                gameDriver.driverOverride == GameSettingsStore.SYSTEM_DRIVER -> ""
 
-        if (driverViewModel.selected.isNotEmpty()) {
-            val metaData = drivers.find { it.driverPath == driverViewModel.selected }
+            gameDriver.isEnabled &&
+                gameDriver.driverOverride.isNotEmpty() &&
+                drivers.any { it.driverPath == gameDriver.driverOverride } -> gameDriver.driverOverride
 
-            metaData?.apply {
-                val privatePath = activity.filesDir
-                val privateDriverPath = privatePath.canonicalPath + "/driver/"
-                val pD = File(privateDriverPath)
-                if (pD.exists())
-                    pD.deleteRecursively()
-
-                pD.mkdirs()
-
-                val driver = File(driverViewModel.selected)
-                val parent = driver.parentFile
-                if (parent != null) {
-                    for (file in parent.walkTopDown()) {
-                        if (file.absolutePath == parent.absolutePath)
-                            continue
-                        file.copyTo(File(privateDriverPath + file.name), true)
-                    }
-                }
-
-                driverHandle = NativeHelpers.instance.loadDriver(
-                    activity.applicationInfo.nativeLibraryDir!! + "/",
-                    privateDriverPath,
-                    this.libraryName
-                )
-            }
-
+            else -> driverViewModel.selected
         }
+
+        val driverLoadResult = DriverPreparationManager.prepareAndLoadDriver(
+            activity,
+            selectedDriverPath,
+            drivers
+        )
+        val driverHandle = driverLoadResult.handle
 
         val extensions = nativeInterop.VkRequiredExtensions
 
@@ -255,7 +412,7 @@ class MainViewModel(val activity: MainActivity) {
                     settings.memoryManagerMode.ordinal,
                     settings.useNce,
                     settings.memoryConfiguration.ordinal,
-                    settings.memorySlack.gigabytes,
+                    if (settings.memorySlackEnabled) 12 else 0,
                     /* OLD: was fixed -> SystemLanguage.AmericanEnglish.ordinal */
                     loadSystemLanguage().ordinal,
                     /* OLD: was fixed -> RegionCode.USA.ordinal */
@@ -292,13 +449,95 @@ class MainViewModel(val activity: MainActivity) {
 
         val settings = QuickSettings(activity)
 
+        KenjinxNative.deviceSetExperimentalGameFixes(false)
+        KenjinxNative.deviceSetNifmOffline(false)
+
+        // NEOV2 NCE-PROT1: sem perfil de jogo, vale a configuracao global.
+        try {
+            KenjinxNative.deviceSetNceTrackingProtection(settings.enableNceTrackingProtection)
+        } catch (_: Throwable) {
+        }
+
+        // NEOV2 DMA-RELAX1: sem perfil de jogo, vale a configuracao global.
+        try {
+            KenjinxNative.deviceSetRelaxedDmaCopy(settings.enableRelaxedDmaCopy)
+        } catch (_: Throwable) {
+        }
+        // NEOV2-GPUMEM1: sem perfil de jogo, vale a configuracao global.
+        try {
+            KenjinxNative.deviceSetEdenGpuMemory(settings.enableEdenGpuMemory)
+        } catch (_: Throwable) {
+        }
+        // NEOV2-VP9EDEN1: VP9 pelo FFmpeg (chave geral).
+        try {
+            KenjinxNative.deviceSetVp9FFmpeg(settings.enableVp9FFmpeg)
+        } catch (_: Throwable) {
+        }
+        // NEOV2-AUDIO1: amplificacao do audio (100% a 200%).
+        try {
+            KenjinxNative.deviceSetAudioBoost(settings.audioBoost)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetRejectUnmappedDescriptors(settings.enableRejectUnmappedDescriptors)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetAsyncLarge3DTextureUpload(settings.enableAsyncLarge3DUpload)
+        } catch (_: Throwable) {
+        }
+        // Opcao "Otimizacoes de GPU", antes de criar o renderer. TEXBUF-ALIGN1 e correcao e fica sempre ligado.
+        try {
+            KenjinxNative.deviceSetTurnipFence(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetConditionalRenderNoWait(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetCommandFetchNoFlush(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetTexelBufferExactOffset(true)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetQueueHysteresis(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetTimelineLazy(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetStagingBufferLock(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+        try {
+            KenjinxNative.deviceSetTexturePoolKeepInvalid(settings.enableGpuOptimizations)
+        } catch (_: Throwable) {
+        }
+
         // 0=Auto, 1=SingleThread, 2=Threaded
         val backendMode = if (settings.disableThreadedRendering) 1 else 2
 
         var success = KenjinxNative.graphicsInitialize(
             enableMacroHLE = settings.enableMacroHLE,
             enableShaderCache = settings.enableShaderCache,
+            enableShaderLoopSafety = settings.enableShaderLoopSafety,
             enableTextureRecompression = settings.enableTextureRecompression,
+            enableVtgViaCompute = settings.enableVtgViaCompute,
+            drawFlushMode = settings.drawFlushMode,
+            drawFlushGlobalMode = settings.drawFlushMode,
+            drawFlushGameOverride = -1,
+            bufferReadbackMode = settings.bufferReadbackMode,
+            bufferReadbackGlobalMode = settings.bufferReadbackMode,
+            bufferReadbackGameOverride = -1,
+            strictSyncMode = settings.strictSyncMode,
+            strictSyncGlobalMode = settings.strictSyncMode,
+            strictSyncGameOverride = -1,
             rescale = settings.resScale,
             maxAnisotropy = settings.maxAnisotropy,
             backendThreading = backendMode
@@ -317,38 +556,12 @@ class MainViewModel(val activity: MainActivity) {
         val driverViewModel = VulkanDriverViewModel(activity)
         val drivers = driverViewModel.getAvailableDrivers()
 
-        var driverHandle = 0L
-
-        if (driverViewModel.selected.isNotEmpty()) {
-            val metaData = drivers.find { it.driverPath == driverViewModel.selected }
-
-            metaData?.apply {
-                val privatePath = activity.filesDir
-                val privateDriverPath = privatePath.canonicalPath + "/driver/"
-                val pD = File(privateDriverPath)
-                if (pD.exists())
-                    pD.deleteRecursively()
-
-                pD.mkdirs()
-
-                val driver = File(driverViewModel.selected)
-                val parent = driver.parentFile
-                if (parent != null) {
-                    for (file in parent.walkTopDown()) {
-                        if (file.absolutePath == parent.absolutePath)
-                            continue
-                        file.copyTo(File(privateDriverPath + file.name), true)
-                    }
-                }
-
-                driverHandle = NativeHelpers.instance.loadDriver(
-                    activity.applicationInfo.nativeLibraryDir!! + "/",
-                    privateDriverPath,
-                    this.libraryName
-                )
-            }
-
-        }
+        val driverLoadResult = DriverPreparationManager.prepareAndLoadDriver(
+            activity,
+            driverViewModel.selected,
+            drivers
+        )
+        val driverHandle = driverLoadResult.handle
 
         val extensions = nativeInterop.VkRequiredExtensions
 
@@ -371,7 +584,7 @@ class MainViewModel(val activity: MainActivity) {
                     settings.memoryManagerMode.ordinal,
                     settings.useNce,
                     settings.memoryConfiguration.ordinal,
-                    settings.memorySlack.gigabytes,
+                    if (settings.memorySlackEnabled) 12 else 0,
                     /* OLD: was fixed -> SystemLanguage.AmericanEnglish.ordinal */
                     loadSystemLanguage().ordinal,
                     /* OLD: was fixed -> RegionCode.USA.ordinal */
@@ -456,15 +669,13 @@ class MainViewModel(val activity: MainActivity) {
         gameFps: MutableState<Double>,
         gameTime: MutableState<Double>,
         usedMem: MutableState<Int>,
-        totalMem: MutableState<Int>,
-        frequencies: MutableList<Double>
+        totalMem: MutableState<Int>
     ) {
         fifoState = fifo
         gameFpsState = gameFps
         gameTimeState = gameTime
         usedMemState = usedMem
         totalMemState = totalMem
-        frequenciesState = frequencies
     }
 
     fun updateStats(
@@ -489,7 +700,6 @@ class MainViewModel(val activity: MainActivity) {
                 )
             }
         }
-        frequenciesState?.let { PerformanceMonitor.getFrequencies(it) }
     }
 
     fun setGameController(controller: IGameController) {
@@ -497,9 +707,11 @@ class MainViewModel(val activity: MainActivity) {
     }
 
     fun navigateToGame() {
+        gameExitGeneration++
+        gameExitRequested.value = false
         navController?.navigate("game")
         activity.isGameRunning = true
-        if (QuickSettings(activity).enableMotion)
+        if (getSettingsForGame().enableMotion)
             motionSensorManager?.register()
     }
 

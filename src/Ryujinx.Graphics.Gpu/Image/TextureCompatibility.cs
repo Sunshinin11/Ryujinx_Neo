@@ -381,6 +381,19 @@ namespace Ryujinx.Graphics.Gpu.Image
                     ? TextureViewCompatibility.CopyOnly
                     : result;
             }
+            else if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled && !lhs.IsLinear && !rhs.IsLinear &&
+                     alignedWidthMatches &&
+                     lhsAlignedSize.Height == rhsAlignedSize.Height &&
+                     lhsSize.Width >= rhsSize.Width &&
+                     lhsSize.Height > rhsSize.Height)
+            {
+                // NEOV2-COSMIC11: como o Eden (IsBlockLinearSizeCompatible com tamanho relaxado), texturas block linear
+                // com o mesmo tamanho alinhado sao a mesma imagem na memoria. O driver Vulkan do Switch desenha num render
+                // target com a altura alinhada (ex.: 480x384, 1920x1152) e depois le a imagem com a altura real
+                // (480x270, 1920x1080). Antes isso dava LayoutIncompatible e a textura lida era criada vazia (tela preta
+                // no MARVEL Cosmic Invasion). Com CopyOnly, a textura menor recebe uma copia do render target.
+                return TextureViewCompatibility.CopyOnly;
+            }
             else if (lhs.IsLinear && rhs.IsLinear && lhsSize.Height == rhsSize.Height)
             {
                 // Copy between linear textures with matching stride.

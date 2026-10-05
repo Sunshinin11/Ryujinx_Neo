@@ -8,20 +8,7 @@ namespace Ryujinx.Graphics.Vulkan
 {
     struct PipelineState : IDisposable
     {
-        private const int MaxDynamicStatesCount = 16;
-
-        // NEOV2 Etapa 23: bits of Id6 that become dynamic state (EXT_extended_dynamic_state) on Turnip.
-        // DepthCompareOp, stencil front/back ops, CullMode (bits 24-52), FrontFace (56),
-        // DepthTestEnable (58), DepthWriteEnable (59) and StencilTestEnable (61).
-        public const ulong ExtendedDynamicStateMask =
-            (((1UL << 29) - 1UL) << 24) | (1UL << 56) | (1UL << 58) | (1UL << 59) | (1UL << 61);
-
-        private static int _extendedDynamicStateLogged;
-
-        public static bool UsesExtendedDynamicState(VulkanRenderer gd)
-        {
-            return gd.IsTurnip && gd.Capabilities.SupportsExtendedDynamicState && gd.ExtendedDynamicStateApi != null;
-        }
+        private const int MaxDynamicStatesCount = 9;
 
         private static readonly Lock _pipelineCreateLock = new();
 
@@ -407,46 +394,13 @@ namespace Ryujinx.Graphics.Vulkan
             return pipeline;
         }
 
-        public Auto<DisposablePipeline> CreateGraphicsPipeline(
+        public unsafe Auto<DisposablePipeline> CreateGraphicsPipeline(
             VulkanRenderer gd,
             Device device,
             ShaderCollection program,
             PipelineCache cache,
             RenderPass renderPass,
             bool throwOnError = false)
-        {
-            if (!UsesExtendedDynamicState(gd))
-            {
-                return CreateGraphicsPipelineCore(gd, device, program, cache, renderPass, throwOnError, false);
-            }
-
-            if (Interlocked.Exchange(ref _extendedDynamicStateLogged, 1) == 0)
-            {
-                Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, "[NEOV2-ETAPA23] Extended dynamic state (cull, front face, depth, stencil) enabled for graphics pipelines (Turnip)");
-            }
-
-            // The dynamic fields are cleared from the key, so states that differ only in them share one pipeline.
-            ulong id6 = Internal.Id6;
-            Internal.Id6 = id6 & ~ExtendedDynamicStateMask;
-
-            try
-            {
-                return CreateGraphicsPipelineCore(gd, device, program, cache, renderPass, throwOnError, true);
-            }
-            finally
-            {
-                Internal.Id6 = id6;
-            }
-        }
-
-        private unsafe Auto<DisposablePipeline> CreateGraphicsPipelineCore(
-            VulkanRenderer gd,
-            Device device,
-            ShaderCollection program,
-            PipelineCache cache,
-            RenderPass renderPass,
-            bool throwOnError,
-            bool extendedDynamicState)
         {
             if (program.TryGetGraphicsPipeline(ref Internal, out Auto<DisposablePipeline> pipeline))
             {
@@ -653,17 +607,6 @@ namespace Ryujinx.Graphics.Vulkan
                 if (supportsFeedbackLoopDynamicState)
                 {
                     dynamicStates[dynamicStatesCount++] = DynamicState.AttachmentFeedbackLoopEnableExt;
-                }
-
-                if (extendedDynamicState)
-                {
-                    dynamicStates[dynamicStatesCount++] = DynamicState.CullModeExt;
-                    dynamicStates[dynamicStatesCount++] = DynamicState.FrontFaceExt;
-                    dynamicStates[dynamicStatesCount++] = DynamicState.DepthTestEnableExt;
-                    dynamicStates[dynamicStatesCount++] = DynamicState.DepthWriteEnableExt;
-                    dynamicStates[dynamicStatesCount++] = DynamicState.DepthCompareOpExt;
-                    dynamicStates[dynamicStatesCount++] = DynamicState.StencilTestEnableExt;
-                    dynamicStates[dynamicStatesCount++] = DynamicState.StencilOpExt;
                 }
 
                 PipelineDynamicStateCreateInfo pipelineDynamicStateCreateInfo = new()

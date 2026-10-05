@@ -350,6 +350,11 @@ namespace Ryujinx.Graphics.Vulkan
                 SType = StructureType.PhysicalDeviceTransformFeedbackFeaturesExt,
             };
 
+            PhysicalDeviceConditionalRenderingFeaturesEXT featuresConditionalRendering = new()
+            {
+                SType = StructureType.PhysicalDeviceConditionalRenderingFeaturesExt,
+            };
+
             PhysicalDeviceFeatures2 features2 = new()
             {
                 SType = StructureType.PhysicalDeviceFeatures2,
@@ -394,6 +399,17 @@ namespace Ryujinx.Graphics.Vulkan
             if (physicalDevice.IsDeviceExtensionPresent(ExtTransformFeedback.ExtensionName))
             {
                 features2.PNext = &supportedFeaturesTransformFeedback;
+            }
+
+            PhysicalDeviceConditionalRenderingFeaturesEXT supportedFeaturesConditionalRendering = new()
+            {
+                SType = StructureType.PhysicalDeviceConditionalRenderingFeaturesExt,
+                PNext = features2.PNext,
+            };
+
+            if (physicalDevice.IsDeviceExtensionPresent(ExtConditionalRendering.ExtensionName))
+            {
+                features2.PNext = &supportedFeaturesConditionalRendering;
             }
 
             PhysicalDeviceRobustness2FeaturesEXT supportedFeaturesRobustness2 = new()
@@ -545,6 +561,15 @@ namespace Ryujinx.Graphics.Vulkan
                 featuresTransformFeedback.TransformFeedback = supportedFeaturesTransformFeedback.TransformFeedback;
 
                 pExtendedFeatures = &featuresTransformFeedback;
+            }
+
+            if (physicalDevice.IsDeviceExtensionPresent(ExtConditionalRendering.ExtensionName) &&
+                supportedFeaturesConditionalRendering.ConditionalRendering)
+            {
+                featuresConditionalRendering.PNext = pExtendedFeatures;
+                featuresConditionalRendering.ConditionalRendering = true;
+
+                pExtendedFeatures = &featuresConditionalRendering;
             }
 
             if (physicalDevice.IsDeviceExtensionPresent("VK_EXT_primitive_topology_list_restart"))

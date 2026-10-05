@@ -24,6 +24,9 @@ namespace Ryujinx.Graphics.Vulkan
             _blockLists = [];
             _blockAlignment = (int)Math.Min(int.MaxValue, MaxDeviceMemoryUsageEstimate / _physicalDevice.PhysicalDeviceProperties.Limits.MaxMemoryAllocationCount);
             _lock = new(LockRecursionPolicy.NoRecursion);
+
+            // NEOV2-GPUMEM1: a new renderer starts with no device memory.
+            Ryujinx.Graphics.GAL.GpuMemoryStats.Reset();
         }
 
         public MemoryAllocation AllocateDeviceMemory(

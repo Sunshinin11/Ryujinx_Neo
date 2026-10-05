@@ -57,7 +57,7 @@ namespace Ryujinx.HLE.HOS
 
         public static NceCpuCodePatch CreateCodePatchForNce(KernelContext context, bool for64Bit, ReadOnlySpan<byte> textSection)
         {
-            if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 && for64Bit && context.Device.Configuration.UseHypervisor && !OperatingSystem.IsMacOS())
+            if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 && for64Bit && context.Device.Configuration.UseHypervisor && !OperatingSystem.IsMacOS() && NceEngine.IsSupportedHostPageSize)
             {
                 return NcePatcher.CreatePatch(textSection);
             }
@@ -71,7 +71,18 @@ namespace Ryujinx.HLE.HOS
 
             bool isArm64Host = RuntimeInformation.ProcessArchitecture == Architecture.Arm64;
 
-            if (isArm64Host && for64Bit && context.Device.Configuration.UseHypervisor)
+            if (isArm64Host && for64Bit && context.Device.Configuration.UseHypervisor && !NceEngine.IsSupportedHostPageSize)
+                Logger.Warning?.Print(LogClass.Cpu, $"[NEO-NCE-R14] hostPageBytes={MemoryBlock.GetPageSize()}; using JIT because native 4 KiB guest permissions cannot be enforced on this host.");
+
+            // NEOV2-NCE36: only 39-bit address spaces are laid out for NCE (see ProcessLoaderHelper); 36-bit titles use JIT.
+            bool nceAddressSpace = addressSpaceSize >= (1UL << 39);
+
+            if (isArm64Host && for64Bit && context.Device.Configuration.UseHypervisor && NceEngine.IsSupportedHostPageSize && !nceAddressSpace)
+            {
+                Logger.Info?.Print(LogClass.Cpu, $"[NEOV2-NCE36] 0x{addressSpaceSize:X} address space (36-bit title); using JIT instead of NCE.");
+            }
+
+            if (isArm64Host && for64Bit && context.Device.Configuration.UseHypervisor && NceEngine.IsSupportedHostPageSize && nceAddressSpace)
             {
                 if (OperatingSystem.IsMacOS())
                 {

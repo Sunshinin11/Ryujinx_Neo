@@ -16,6 +16,14 @@ namespace Ryujinx.Graphics.Vulkan
         private readonly BufferHandle _handle;
         private Auto<DisposableBuffer> _buffer;
 
+        public readonly bool BindingEquals(in IndexBufferState other)
+        {
+            return _handle == other._handle &&
+                   _offset == other._offset &&
+                   _size == other._size &&
+                   _type == other._type;
+        }
+
         public IndexBufferState(BufferHandle handle, int offset, int size, IndexType type)
         {
             _handle = handle;

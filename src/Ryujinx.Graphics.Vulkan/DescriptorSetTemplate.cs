@@ -47,7 +47,11 @@ namespace Ryujinx.Graphics.Vulkan
                 {
                     entries[seg] = new DescriptorUpdateTemplateEntry()
                     {
-                        DescriptorType = segment.Type.Convert(),
+                        DescriptorType = plce.UseDynamicUniformBuffers &&
+                            setIndex == PipelineBase.UniformSetIndex &&
+                            segment.Type == ResourceType.UniformBuffer
+                                ? DescriptorType.UniformBufferDynamic
+                                : segment.Type.Convert(),
                         DstBinding = (uint)binding,
                         DescriptorCount = (uint)count,
                         Offset = structureOffset,

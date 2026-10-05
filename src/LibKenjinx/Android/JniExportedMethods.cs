@@ -516,7 +516,18 @@ namespace LibKenjinx
                 bool enableMacroJit,
                 bool enableMacroHLE,
                 bool enableShaderCache,
+                bool enableShaderLoopSafety,
                 bool enableTextureRecompression,
+                bool enableVtgViaCompute,
+                int drawFlushMode,
+                int drawFlushGlobalMode,
+                int drawFlushGameOverride,
+                int bufferReadbackMode,
+                int bufferReadbackGlobalMode,
+                int bufferReadbackGameOverride,
+                int strictSyncMode,
+                int strictSyncGlobalMode,
+                int strictSyncGameOverride,
                 int backendThreading)
         {
             Logger.Trace?.Print(LogClass.Application, "Jni Function Call");
@@ -530,7 +541,18 @@ namespace LibKenjinx
                 EnableMacroJit = enableMacroJit,
                 EnableMacroHLE = enableMacroHLE,
                 EnableShaderCache = enableShaderCache,
+                EnableShaderLoopSafety = enableShaderLoopSafety,
                 EnableTextureRecompression = enableTextureRecompression,
+                EnableVtgViaCompute = enableVtgViaCompute,
+                DrawFlushMode = drawFlushMode,
+                DrawFlushGlobalMode = drawFlushGlobalMode,
+                DrawFlushGameOverride = drawFlushGameOverride,
+                BufferReadbackMode = bufferReadbackMode,
+                BufferReadbackGlobalMode = bufferReadbackGlobalMode,
+                BufferReadbackGameOverride = bufferReadbackGameOverride,
+                StrictSyncMode = strictSyncMode,
+                StrictSyncGlobalMode = strictSyncGlobalMode,
+                StrictSyncGameOverride = strictSyncGameOverride,
                 BackendThreading = (BackendThreading)backendThreading
             });
         }
@@ -1030,6 +1052,222 @@ namespace LibKenjinx
             Logger.Trace?.Print(LogClass.Application, $"[JNI] graphicsSetFullscreenStretch({enable})");
             ApplyFullscreenStretch(enable);
         }
+
+        // NEOV2 NCE-PROT1: per game switch, set before the game is loaded.
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetNceTrackingProtection")]
+        public static void JniDeviceSetNceTrackingProtection(bool enable)
+        {
+            Ryujinx.Cpu.Nce.MemoryManagerNative.TrackingProtectionRestoreEnabled = enable;
+            Logger.Info?.Print(LogClass.Cpu, $"[NEOV2-NCE-PROT1] Tracking protection restore: {(enable ? "enabled" : "disabled")}");
+        }
+
+        // NEOV2 DMA-RELAX1: chave geral e por jogo "Copia DMA relaxada", definida antes de carregar o jogo.
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetRelaxedDmaCopy")]
+        public static void JniDeviceSetRelaxedDmaCopy(bool enable)
+        {
+            Ryujinx.Graphics.Gpu.GraphicsConfig.RelaxedDmaCopy = enable;
+            Logger.Info?.Print(LogClass.Gpu, $"[NEOV2-DMA-RELAX1] Relaxed DMA copy: {(enable ? "enabled" : "disabled")}");
+        }
+
+        // NEOV2-GPUMEM1: chave geral e por jogo "Memoria de GPU estilo Eden", definida antes de carregar o jogo.
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetEdenGpuMemory")]
+        public static void JniDeviceSetEdenGpuMemory(bool enable)
+        {
+            Ryujinx.Graphics.Gpu.GraphicsConfig.EdenGpuMemory = enable;
+            Ryujinx.Graphics.GAL.GpuMemoryStats.HostRamGuardEnabled = enable; // NEOV2-RAMGUARD1
+            Logger.Info?.Print(LogClass.Gpu, $"Memoria de GPU estilo Eden: {(enable ? "ligada" : "desligada")}");
+        }
+
+        // NEOV2-VP9EDEN1: chave geral "VP9 pelo FFmpeg (Eden)", definida antes de carregar o jogo.
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetVp9FFmpeg")]
+        public static void JniDeviceSetVp9FFmpeg(bool enable)
+        {
+            Ryujinx.Common.Diagnostics.NeoGraphicsSettings.Vp9FFmpegEnabled = enable;
+            Logger.Info?.Print(LogClass.Nvdec, $"[NEOV2-VP9EDEN1] VP9 pelo FFmpeg: {(enable ? "ligado" : "desligado")}");
+        }
+
+        // NEOV2-NCZ2: conversor NSP -> NSZ. Bloqueante: chamar fora da thread de UI.
+        [UnmanagedCallersOnly(EntryPoint = "deviceCompressNsp")]
+        public static int JniDeviceCompressNsp(int inDescriptor, int outDescriptor, int level)
+        {
+            if (SwitchDevice?.VirtualFileSystem == null)
+            {
+                Logger.Error?.Print(LogClass.Loader, "[NEOV2-NCZ2] SwitchDevice is not initialized");
+                return Ryujinx.HLE.FileSystem.NczCompressor.ResultError;
+            }
+
+            using FileStream input = OpenFile(inDescriptor);
+            using FileStream output = OpenFile(outDescriptor);
+
+            return Ryujinx.HLE.FileSystem.NczCompressor.CompressNsp(input, output, SwitchDevice.VirtualFileSystem, level);
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceCompressProgress")]
+        public static int JniDeviceCompressProgress() => Ryujinx.HLE.FileSystem.NczCompressor.Permille;
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceCompressPhase")]
+        public static int JniDeviceCompressPhase() => Ryujinx.HLE.FileSystem.NczCompressor.Phase;
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceCompressCancel")]
+        public static void JniDeviceCompressCancel() => Ryujinx.HLE.FileSystem.NczCompressor.Cancel();
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceDecompressSize")]
+        public static long JniDeviceDecompressSize(int descriptor, int standalone)
+        {
+            try
+            {
+                using FileStream input = new(new Microsoft.Win32.SafeHandles.SafeFileHandle(descriptor, false), FileAccess.Read);
+                return Ryujinx.HLE.FileSystem.NczDecompressor.GetExpectedSize(input, standalone != 0);
+            }
+            catch (Exception exception)
+            {
+                Logger.Error?.Print(LogClass.Loader, $"[NEO-QOL1-DECOMPRESS] Descriptor inspection failed: {exception.Message}");
+                return -1;
+            }
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceDecompress")]
+        public static int JniDeviceDecompress(int inputDescriptor, int outputDescriptor, int standalone, nint sourceName)
+        {
+            if (inputDescriptor == outputDescriptor) return Ryujinx.HLE.FileSystem.NczCompressor.ResultError;
+            try
+            {
+                using FileStream input = new(new Microsoft.Win32.SafeHandles.SafeFileHandle(inputDescriptor, false), FileAccess.Read);
+                using FileStream output = new(new Microsoft.Win32.SafeHandles.SafeFileHandle(outputDescriptor, false), FileAccess.ReadWrite);
+                return Ryujinx.HLE.FileSystem.NczDecompressor.Decompress(input, output, standalone != 0,
+                    Marshal.PtrToStringUTF8(sourceName) ?? "standalone.ncz");
+            }
+            catch (Exception exception)
+            {
+                Logger.Error?.Print(LogClass.Loader, $"[NEO-QOL1-DECOMPRESS] Descriptor conversion failed: {exception.Message}");
+                return Ryujinx.HLE.FileSystem.NczCompressor.ResultError;
+            }
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceDecompressProgress")]
+        public static int JniDeviceDecompressProgress() => Ryujinx.HLE.FileSystem.NczDecompressor.Permille;
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceDecompressPhase")]
+        public static int JniDeviceDecompressPhase() => Ryujinx.HLE.FileSystem.NczDecompressor.Phase;
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceDecompressCancel")]
+        public static void JniDeviceDecompressCancel() => Ryujinx.HLE.FileSystem.NczDecompressor.Cancel();
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceOptimizeNszSize")]
+        public static long JniDeviceOptimizeNszSize(int descriptor)
+        {
+            try
+            {
+                using FileStream input = new(new Microsoft.Win32.SafeHandles.SafeFileHandle(descriptor, false), FileAccess.Read);
+                return Ryujinx.HLE.FileSystem.NszBlockOptimizer.GetRequiredSize(input);
+            }
+            catch (Exception exception)
+            {
+                Logger.Error?.Print(LogClass.Loader, $"[NEO-QOL4-NSZBLOCK] Descriptor inspection failed: {exception.Message}");
+                return -1;
+            }
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceOptimizeNsz")]
+        public static int JniDeviceOptimizeNsz(int inputDescriptor, int outputDescriptor)
+        {
+            if (inputDescriptor == outputDescriptor) return Ryujinx.HLE.FileSystem.NczCompressor.ResultError;
+            try
+            {
+                using FileStream input = new(new Microsoft.Win32.SafeHandles.SafeFileHandle(inputDescriptor, false), FileAccess.Read);
+                using FileStream output = new(new Microsoft.Win32.SafeHandles.SafeFileHandle(outputDescriptor, false), FileAccess.ReadWrite);
+                return Ryujinx.HLE.FileSystem.NszBlockOptimizer.Optimize(input, output);
+            }
+            catch (Exception exception)
+            {
+                Logger.Error?.Print(LogClass.Loader, $"[NEO-QOL4-NSZBLOCK] Descriptor conversion failed: {exception.Message}");
+                return Ryujinx.HLE.FileSystem.NczCompressor.ResultError;
+            }
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceOptimizeNszProgress")]
+        public static int JniDeviceOptimizeNszProgress() => Ryujinx.HLE.FileSystem.NszBlockOptimizer.Permille;
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceOptimizeNszPhase")]
+        public static int JniDeviceOptimizeNszPhase() => Ryujinx.HLE.FileSystem.NszBlockOptimizer.Phase;
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceOptimizeNszCancel")]
+        public static void JniDeviceOptimizeNszCancel() => Ryujinx.HLE.FileSystem.NszBlockOptimizer.Cancel();
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetAudioBoost")]
+        public static void JniDeviceSetAudioBoost(float gain)
+        {
+            Ryujinx.Audio.Backends.OpenAL.OpenALHardwareDeviceDriver.OutputBoost = Math.Clamp(gain, 1f, 2f);
+            Logger.Info?.Print(LogClass.Audio, $"[NEOV2-AUDIO1] Amplificacao do audio: {Math.Clamp(gain, 1f, 2f) * 100:F0}%");
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetRejectUnmappedDescriptors")]
+        public static void JniDeviceSetRejectUnmappedDescriptors(bool enable)
+        {
+            Ryujinx.Graphics.Gpu.GraphicsConfig.RejectUnmappedTextureDescriptors = enable;
+        }
+
+        // Chave por jogo "Compatibilidade grafica 2D" (correcoes do MARVEL Cosmic Invasion).
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetExperimentalGameFixes")]
+        public static void JniDeviceSetExperimentalGameFixes(bool enable)
+        {
+            Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled = enable;
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetAsyncLarge3DTextureUpload")]
+        public static void JniDeviceSetAsyncLarge3DTextureUpload(bool enable)
+        {
+            Ryujinx.Graphics.Gpu.GraphicsConfig.AsyncLarge3DTextureUpload = enable;
+        }
+
+        // Opcao por jogo "Otimizacoes de GPU" (o app envia o mesmo valor para todas, menos TEXBUF-ALIGN1, sempre ligado).
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetTurnipFence")]
+        public static void JniDeviceSetTurnipFence(bool enable)
+        {
+            Ryujinx.Common.Diagnostics.NeoGraphicsSettings.TurnipFenceEnabled = enable;
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetConditionalRenderNoWait")]
+        public static void JniDeviceSetConditionalRenderNoWait(bool enable)
+        {
+            Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ConditionalRenderNoWaitEnabled = enable;
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetCommandFetchNoFlush")]
+        public static void JniDeviceSetCommandFetchNoFlush(bool enable)
+        {
+            Ryujinx.Common.Diagnostics.NeoGraphicsSettings.CommandFetchWithoutFlushEnabled = enable;
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetTexelBufferExactOffset")]
+        public static void JniDeviceSetTexelBufferExactOffset(bool enable)
+        {
+            Ryujinx.Common.Diagnostics.NeoGraphicsSettings.TexelBufferExactOffsetEnabled = enable;
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetQueueHysteresis")]
+        public static void JniDeviceSetQueueHysteresis(bool enable)
+        {
+            Ryujinx.Common.Diagnostics.NeoGraphicsSettings.QueueHysteresisEnabled = enable;
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetTimelineLazy")]
+        public static void JniDeviceSetTimelineLazy(bool enable)
+        {
+            Ryujinx.Common.Diagnostics.NeoGraphicsSettings.TimelineLazyEnabled = enable;
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetStagingBufferLock")]
+        public static void JniDeviceSetStagingBufferLock(bool enable)
+        {
+            Ryujinx.Common.Diagnostics.NeoGraphicsSettings.StagingBufferLockEnabled = enable;
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetTexturePoolKeepInvalid")]
+        public static void JniDeviceSetTexturePoolKeepInvalid(bool enable)
+        {
+            Ryujinx.Common.Diagnostics.NeoGraphicsSettings.TexturePoolKeepInvalidEnabled = enable;
+        }
 #endif
 
         // Used by MainActivity/GameHost
@@ -1106,6 +1344,20 @@ namespace LibKenjinx
             Error = 0x06,
             Fatal = 0x07,
             Silent = 0x08,
+        }
+
+        // Opcao por jogo "Modo sem internet" (DOOM 2016).
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetNifmOffline")]
+        public static void JniDeviceSetNifmOffline(bool enable)
+        {
+            Ryujinx.Common.Diagnostics.NeoGraphicsSettings.NifmOfflineEnabled = enable;
+        }
+
+        // Opcao por jogo "Termos offline" (BioShock).
+        [UnmanagedCallersOnly(EntryPoint = "deviceSetWebOfflineTerms")]
+        public static void JniDeviceSetWebOfflineTerms(bool enable)
+        {
+            Ryujinx.Common.Diagnostics.NeoGraphicsSettings.WebOfflineTermsEnabled = enable;
         }
     }
 }

@@ -1,3 +1,4 @@
+using Ryujinx.Common.Diagnostics;
 using Ryujinx.Common.Logging;
 using System;
 using System.Collections.Generic;
@@ -55,6 +56,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         public static void RecordStorageCreated(long bytes)
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             Interlocked.Increment(ref _storagesCreated);
             Interlocked.Increment(ref _liveCount[0]);
             Interlocked.Add(ref _liveBytes[0], bytes);
@@ -65,6 +68,8 @@ namespace Ryujinx.Graphics.Vulkan
         /// </summary>
         public static void RecordBecameRenderTarget(long bytes, int flags)
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             int bucket = Bucket(flags);
 
             Interlocked.Increment(ref _rtCreated);
@@ -74,11 +79,15 @@ namespace Ryujinx.Graphics.Vulkan
 
         public static void RecordAliasImageCreated()
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             Interlocked.Increment(ref _aliasImagesCreated);
         }
 
         public static void RecordStorageDisposed(bool isRenderTarget, long bytes, int flags)
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             int bucket = Bucket(flags);
 
             Interlocked.Decrement(ref _liveCount[bucket]);
@@ -93,6 +102,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         public static void RecordFlagsChanged(bool isRenderTarget, long bytes, int oldFlags, int newFlags)
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             int oldBucket = Bucket(oldFlags);
             int newBucket = Bucket(newFlags);
 
@@ -154,6 +165,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         public static void TryFlush()
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             long now = Stopwatch.GetTimestamp();
 
             if (now - Volatile.Read(ref _lastLogTimestamp) < Stopwatch.Frequency * 5)
@@ -184,6 +197,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         private static void Log()
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             StringBuilder top = new();
 
             lock (_pairsLock)

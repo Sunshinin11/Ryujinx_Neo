@@ -1261,6 +1261,33 @@ namespace Ryujinx.Graphics.Gpu.Image
         }
 
         /// <summary>
+        /// NEOV2 TWOD-GPUDST2: checks if any cached texture overlaps the given GPU virtual address.
+        /// </summary>
+        /// <param name="memoryManager">GPU memory manager where the address is mapped</param>
+        /// <param name="gpuVa">GPU virtual address</param>
+        /// <returns>True if a cached texture overlaps the address, false otherwise</returns>
+        public bool HasTextureAt(MemoryManager memoryManager, ulong gpuVa)
+        {
+            ulong address = memoryManager.Translate(gpuVa);
+
+            if (address == MemoryManager.PteUnmapped)
+            {
+                return false;
+            }
+
+            _texturesLock.EnterReadLock();
+
+            try
+            {
+                return _textures.FindOverlaps(address, ref _textureOverlaps) > 0;
+            }
+            finally
+            {
+                _texturesLock.ExitReadLock();
+            }
+        }
+
+        /// <summary>
         /// Resizes the temporary buffer used for range list intersection results, if it has grown too much.
         /// </summary>
         private void ShrinkOverlapsBufferIfNeeded()
@@ -1439,6 +1466,9 @@ namespace Ryujinx.Graphics.Gpu.Image
         public void Tick()
         {
             _cache.ProcessShortCache();
+
+            // NEOV2-GPUMEM1: Eden-style collection driven by the real device memory usage.
+            _cache.TickMemoryPressure();
         }
 
         /// <summary>

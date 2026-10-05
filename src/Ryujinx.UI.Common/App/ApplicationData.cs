@@ -61,11 +61,11 @@ namespace Ryujinx.UI.App.Common
 
             string extension = System.IO.Path.GetExtension(titleFilePath).ToLower();
 
-            if (extension is ".nsp" or ".xci")
+            if (extension is ".nsp" or ".nsz" or ".xci" or ".xcz")
             {
                 IFileSystem pfs;
 
-                if (extension == ".xci")
+                if (extension is ".xci" or ".xcz")
                 {
                     Xci xci = new(virtualFileSystem.KeySet, file.AsStorage());
 
@@ -77,6 +77,8 @@ namespace Ryujinx.UI.App.Common
                     pfsTemp.Initialize(file.AsStorage()).ThrowIfFailure();
                     pfs = pfsTemp;
                 }
+
+                pfs = NczSupport.WrapIfCompressed(pfs);
 
                 foreach (DirectoryEntryEx fileEntry in pfs.EnumerateEntries("/", "*.nca"))
                 {

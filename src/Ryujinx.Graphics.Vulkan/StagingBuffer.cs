@@ -26,7 +26,22 @@ namespace Ryujinx.Graphics.Vulkan
         private const int BufferSize = 32 * 1024 * 1024;
 
         private int _freeOffset;
-        private int _freeSize;
+                private int _freeSize;
+        private readonly object _sync = new();
+
+        // Opcao "Otimizacoes de GPU": desligada, o StagingBuffer volta a rodar sem a trava.
+        private readonly bool _useLock = Ryujinx.Common.Diagnostics.NeoGraphicsSettings.StagingBufferLockEnabled;
+
+        private bool EnterSync()
+        {
+            if (!_useLock)
+            {
+                return false;
+            }
+
+            System.Threading.Monitor.Enter(_sync);
+            return true;
+        }
 
         private readonly VulkanRenderer _gd;
         private readonly BufferHolder _buffer;
@@ -60,6 +75,22 @@ namespace Ryujinx.Graphics.Vulkan
 
         public void PushData(CommandBufferPool cbp, CommandBufferScoped? cbs, Action endRenderPass, BufferHolder dst, int dstOffset, ReadOnlySpan<byte> data)
         {
+            bool locked = EnterSync();
+            try
+            {
+                PushDataCore(cbp, cbs, endRenderPass, dst, dstOffset, data);
+            }
+            finally
+            {
+                if (locked)
+                {
+                    System.Threading.Monitor.Exit(_sync);
+                }
+            }
+        }
+
+        private void PushDataCore(CommandBufferPool cbp, CommandBufferScoped? cbs, Action endRenderPass, BufferHolder dst, int dstOffset, ReadOnlySpan<byte> data)
+        {
             bool isRender = cbs != null;
             CommandBufferScoped scoped = cbs ?? cbp.Rent();
 
@@ -74,8 +105,13 @@ namespace Ryujinx.Graphics.Vulkan
                     FreeCompleted();
                 }
 
-                while (_freeSize == 0)
+                while (_freeSize <= 0)
                 {
+                    if (_freeSize < 0)
+                    {
+                        throw new InvalidOperationException($"Staging buffer accounting invalid: freeSize={_freeSize}, freeOffset={_freeOffset}, pending={_pendingCopies.Count}.");
+                    }
+
                     if (!WaitFreeCompleted(cbp))
                     {
                         if (isRender)
@@ -135,6 +171,22 @@ namespace Ryujinx.Graphics.Vulkan
         }
 
         public bool TryPushData(CommandBufferScoped cbs, Action endRenderPass, BufferHolder dst, int dstOffset, ReadOnlySpan<byte> data)
+        {
+            bool locked = EnterSync();
+            try
+            {
+                return TryPushDataCore(cbs, endRenderPass, dst, dstOffset, data);
+            }
+            finally
+            {
+                if (locked)
+                {
+                    System.Threading.Monitor.Exit(_sync);
+                }
+            }
+        }
+
+        private bool TryPushDataCore(CommandBufferScoped cbs, Action endRenderPass, BufferHolder dst, int dstOffset, ReadOnlySpan<byte> data)
         {
             if (data.Length > BufferSize)
             {
@@ -207,7 +259,23 @@ namespace Ryujinx.Graphics.Vulkan
         /// <returns>The reserved range of the staging buffer</returns>
         public unsafe StagingBufferReserved? TryReserveData(CommandBufferScoped cbs, int size, int alignment)
         {
-            if (size > BufferSize)
+            bool locked = EnterSync();
+            try
+            {
+                return TryReserveDataCore(cbs, size, alignment);
+            }
+            finally
+            {
+                if (locked)
+                {
+                    System.Threading.Monitor.Exit(_sync);
+                }
+            }
+        }
+
+        private unsafe StagingBufferReserved? TryReserveDataCore(CommandBufferScoped cbs, int size, int alignment)
+        {
+            if (size <= 0 || size > BufferSize || alignment <= 0 || (alignment & (alignment - 1)) != 0)
             {
                 return null;
             }
@@ -265,6 +333,22 @@ namespace Ryujinx.Graphics.Vulkan
 
         public void FreeCompleted()
         {
+            bool locked = EnterSync();
+            try
+            {
+                FreeCompletedCore();
+            }
+            finally
+            {
+                if (locked)
+                {
+                    System.Threading.Monitor.Exit(_sync);
+                }
+            }
+        }
+
+        private void FreeCompletedCore()
+        {
             FenceHolder signalledFence = null;
             while (_pendingCopies.TryPeek(out PendingCopy pc) && pc.Fence != null && (pc.Fence == signalledFence || pc.Fence.IsSignaledLazy()))
             {
@@ -280,11 +364,14 @@ namespace Ryujinx.Graphics.Vulkan
         {
             if (disposing)
             {
-                _gd.BufferManager.Delete(Handle);
-
-                while (_pendingCopies.TryDequeue(out PendingCopy pc))
+                lock (_sync)
                 {
-                    pc.Fence.Put();
+                    _gd.BufferManager.Delete(Handle);
+
+                    while (_pendingCopies.TryDequeue(out PendingCopy pc))
+                    {
+                        pc.Fence.Put();
+                    }
                 }
             }
         }

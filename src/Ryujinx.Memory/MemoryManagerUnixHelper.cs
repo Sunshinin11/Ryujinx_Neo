@@ -93,6 +93,15 @@ namespace Ryujinx.Memory
         [DllImport("android")]
         internal static extern int ASharedMemory_create(nint name, nuint size);
 
+        // NEOV2 NCE-MEMFD1: memfd_create through the raw syscall (arm64 __NR_memfd_create = 279),
+        // so it does not depend on the bionic wrapper being exported for the app's minimum API level.
+        internal const long SYS_memfd_create_arm64 = 279;
+        internal const uint MFD_CLOEXEC = 0x0001;
+        internal const uint MFD_EXEC = 0x0010;
+
+        [LibraryImport("libc", EntryPoint = "syscall", SetLastError = true)]
+        internal static partial long syscall_memfd_create(long number, nint name, uint flags);
+
         private static int MmapFlagsToSystemFlags(MmapFlags flags)
         {
             int result = 0;

@@ -23,6 +23,7 @@ import androidx.documentfile.provider.DocumentFile
 import com.anggrayudi.storage.SimpleStorageHelper
 import com.sun.jna.JNIEnv
 import org.kenjinx.android.ui.theme.KenjinxAndroidTheme
+import org.kenjinx.android.ui.theme.NeoThemeState
 import org.kenjinx.android.viewmodels.MainViewModel
 import org.kenjinx.android.viewmodels.QuickSettings
 import org.kenjinx.android.viewmodels.GameModel
@@ -319,9 +320,11 @@ class MainActivity : BaseActivity() {
         mainViewModel!!.motionSensorManager = motionSensorManager
         mainViewModel!!.refreshFirmwareVersion()
 
+        NeoThemeState.initialize(this)
+
         mainViewModel?.apply {
             setContent {
-                KenjinxAndroidTheme {
+                KenjinxAndroidTheme(darkTheme = NeoThemeState.isDark) {
                     Surface(
                         modifier = Modifier.fillMaxSize(),
                         color = MaterialTheme.colorScheme.background
@@ -353,7 +356,15 @@ class MainActivity : BaseActivity() {
 
     @SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        event.apply { if (physicalControllerManager.onKeyEvent(this)) return true }
+        // NEOV2-HOTKEY2: atalho do usuario para fechar o emulador (e captura do atalho nas configuracoes).
+        if (ExitHotkey.onKeyEvent(this, event)) return true
+
+        // Fora da emulação, os botões físicos pertencem à navegação da UI
+        // (biblioteca, diálogos e configurações). Só encaminhe ao backend
+        // quando houver um jogo efetivamente em execução.
+        if (isGameRunning) {
+            event.apply { if (physicalControllerManager.onKeyEvent(this)) return true }
+        }
         return super.dispatchKeyEvent(event)
     }
 

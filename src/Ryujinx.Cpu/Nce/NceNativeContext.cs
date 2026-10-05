@@ -18,11 +18,24 @@ namespace Ryujinx.Cpu.Nce
             public uint Pstate;
             public uint Fpcr;
             public uint Fpsr;
+            public uint HostFpcr;
+            public uint HostFpsr;
             public uint InManaged;
             public ulong HostSp;
             public nint HostThreadHandle;
             public ulong TempStorage;
             public nint SvcCallHandler;
+            public ulong Pc;
+            // Append only: all previously published context offsets remain unchanged.
+            public ulong GuestAddressStart;
+            public ulong GuestAddressEnd;
+            public ulong HostX18;
+            public nint SignalExitPc;
+            // R12: live source for a stopped-thread query, not guest execution storage.
+            public ulong SnapshotSource;
+            public ulong SnapshotPc;
+            public uint SnapshotKind;
+            public ulong SnapshotRd;
         }
 
         private static NativeCtxStorage _dummyStorage = new();
@@ -75,6 +88,29 @@ namespace Ryujinx.Cpu.Nce
         {
             return StorageOffset(ref _dummyStorage, ref _dummyStorage.CtrEl0);
         }
+
+        public static int GetGuestAddressStartOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.GuestAddressStart);
+        public static int GetGuestAddressEndOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.GuestAddressEnd);
+
+        public static int GetHostX18Offset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.HostX18);
+        public static int GetSignalExitPcOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.SignalExitPc);
+
+        public static int GetSnapshotSourceOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.SnapshotSource);
+        public static int GetSnapshotPcOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.SnapshotPc);
+        public static int GetSnapshotKindOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.SnapshotKind);
+        public static int GetSnapshotRdOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.SnapshotRd);
+
+        public static int GetPstateOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.Pstate);
+
+        public static int GetFpcrOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.Fpcr);
+
+        public static int GetFpsrOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.Fpsr);
+
+        public static int GetHostFpcrOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.HostFpcr);
+
+        public static int GetHostFpsrOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.HostFpsr);
+
+        public static int GetPcOffset() => StorageOffset(ref _dummyStorage, ref _dummyStorage.Pc);
 
         public static int GetTempStorageOffset()
         {

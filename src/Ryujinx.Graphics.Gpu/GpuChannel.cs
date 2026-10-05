@@ -71,6 +71,8 @@ namespace Ryujinx.Graphics.Gpu
             memoryManager.Physical.BufferCache.NotifyBuffersModified += BufferManager.Rebind;
             memoryManager.MemoryUnmapped += MemoryUnmappedHandler;
 
+            BufferManager.InvalidateVirtualBindings();
+
             // Since the memory manager changed, make sure we will get pools from addresses of the new memory manager.
             TextureManager.ReloadPools();
             memoryManager.Physical.BufferCache.QueuePrune();
@@ -84,6 +86,7 @@ namespace Ryujinx.Graphics.Gpu
         private void MemoryUnmappedHandler(object sender, UnmapEventArgs e)
         {
             TextureManager.ReloadPools();
+            BufferManager.InvalidateVirtualBindings();
 
             MemoryManager memoryManager = Volatile.Read(ref _memoryManager);
             memoryManager?.Physical.BufferCache.QueuePrune();

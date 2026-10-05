@@ -231,6 +231,12 @@ namespace Ryujinx.HLE.FileSystem
                         pfs.Initialize(file.AsStorage());
                         pfs.OpenFile(ref ncaFile.Ref, aoc.NcaPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
                         break;
+                    case ".nsz":
+                    case ".xcz":
+                        // NEOV2-NCZ1: DLC em NSZ/XCZ.
+                        IFileSystem nczContainer = PartitionFileSystemUtils.OpenApplicationFileSystem(file, Path.GetExtension(aoc.ContainerPath) == ".xcz", _virtualFileSystem);
+                        nczContainer.OpenFile(ref ncaFile.Ref, aoc.NcaPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                        break;
                     default:
                         return false; // Print error?
                 }

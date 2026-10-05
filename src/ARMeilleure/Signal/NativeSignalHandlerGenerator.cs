@@ -21,7 +21,7 @@ namespace ARMeilleure.Signal
 
         private const uint EXCEPTION_ACCESS_VIOLATION = 0xc0000005;
 
-        private static Operand EmitGenericRegionCheck(EmitterContext context, nint signalStructPtr, Operand faultAddress, Operand isWrite, int rangeStructSize)
+        private static Operand EmitGenericRegionCheck(EmitterContext context, nint signalStructPtr, Operand faultAddress, Operand isWrite, int rangeStructSize, bool androidFrame = false)
         {
             Operand inRegionLocal = context.AllocateLocal(OperandType.I32);
             context.Copy(inRegionLocal, Const(0));
@@ -63,12 +63,13 @@ namespace ARMeilleure.Signal
                 Operand result = context.Call(trackingActionPtr, OperandType.I64, offset, Const(1UL), isWrite);
                 context.Copy(inRegionLocal, context.ICompareNotEqual(result, Const(0UL)));
 
-                GenerateFaultAddressPatchCode(context, faultAddress, result);
+                context.BranchIfFalse(skipActionLabel, result); // An unhandled fault must leave the signal frame intact.
+                GenerateFaultAddressPatchCode(context, faultAddress, result, androidFrame);
 
                 context.MarkLabel(skipActionLabel);
 
                 // If the tracking action returns false or does not exist, it might be an invalid access due to a partial overlap on Windows.
-                if (OperatingSystem.IsWindows())
+                if (OperatingSystem.IsWindows() && !androidFrame)
                 {
                     context.BranchIfTrue(endLabel, inRegionLocal);
 
@@ -115,34 +116,7 @@ namespace ARMeilleure.Signal
             {
                 if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
                 {
-                    Operand auxPtr = context.AllocateLocal(OperandType.I64);
-
-                    Operand loopLabel = Label();
-                    Operand successLabel = Label();
-
-                    const ulong AuxOffset = 464; // uc_mcontext.__reserved
-                    const uint EsrMagic = 0x45535201;
-
-                    context.Copy(auxPtr, context.Add(ucontextPtr, Const(AuxOffset)));
-
-                    context.MarkLabel(loopLabel);
-
-                    // _aarch64_ctx::magic
-                    Operand magic = context.Load(OperandType.I32, auxPtr);
-                    // _aarch64_ctx::size
-                    Operand size = context.Load(OperandType.I32, context.Add(auxPtr, Const(4ul)));
-
-                    context.BranchIf(successLabel, magic, Const(EsrMagic), Comparison.Equal);
-
-                    context.Copy(auxPtr, context.Add(auxPtr, context.ZeroExtend32(OperandType.I64, size)));
-
-                    context.Branch(loopLabel);
-
-                    context.MarkLabel(successLabel);
-
-                    // esr_context::esr
-                    Operand esr = context.Load(OperandType.I64, context.Add(auxPtr, Const(8ul)));
-                    return context.BitwiseAnd(esr, Const(0x40ul));
+                    return GenerateLinuxArm64WriteFlag(context, ucontextPtr);
                 }
                 else if (RuntimeInformation.ProcessArchitecture == Architecture.X64)
                 {
@@ -155,7 +129,95 @@ namespace ARMeilleure.Signal
             throw new PlatformNotSupportedException();
         }
 
+        // Linux/Android ARM64 places ESR only in sigcontext.__reserved, never extra_context.
+        // Emit native IR: this routine is not called from the signal handler as managed code.
+        internal static Operand GenerateLinuxArm64WriteFlag(EmitterContext context, Operand ucontextPtr)
+            => GenerateLinuxArm64WriteFlag(context, ucontextPtr, false);
+
+        internal static Operand GenerateLinuxArm64TrackingWriteFlag(EmitterContext context, Operand ucontextPtr)
+            => GenerateLinuxArm64WriteFlag(context, ucontextPtr, true);
+
+        private static Operand GenerateLinuxArm64WriteFlag(EmitterContext context, Operand ucontextPtr, bool requireDataAbort)
+        {
+            const ulong AuxOffset = 464; // uc_mcontext.__reserved, verified against Bionic LP64.
+            const ulong ReservedSize = 4096;
+            const uint EsrMagic = 0x45535201;
+            const uint ExtraMagic = 0x45585401;
+
+            Operand auxPtr = context.AllocateLocal(OperandType.I64);
+            Operand remaining = context.AllocateLocal(OperandType.I64);
+            Operand writeFlag = context.AllocateLocal(OperandType.I64);
+            Operand loopLabel = Label();
+            Operand esrLabel = Label();
+            Operand endLabel = Label();
+
+            // Unknown is distinct from read (0) and write (0x40). Do not guess a read.
+            context.Copy(writeFlag, Const(-1L));
+            context.BranchIfFalse(endLabel, ucontextPtr);
+            context.Copy(auxPtr, context.Add(ucontextPtr, Const(AuxOffset)));
+            context.BranchIf(endLabel, auxPtr, ucontextPtr, Comparison.LessUI);
+            context.BranchIfTrue(endLabel, context.BitwiseAnd(auxPtr, Const(15UL)));
+            Operand reservedEnd = context.Add(auxPtr, Const(ReservedSize));
+            context.BranchIf(endLabel, reservedEnd, auxPtr, Comparison.LessUI);
+            context.Copy(remaining, Const(ReservedSize));
+
+            context.MarkLabel(loopLabel);
+            // Positions and record sizes are 16-byte aligned; never load a header past the area.
+            // Invariant: remaining is a nonnegative multiple of 16, so nonzero implies >= 16.
+            context.BranchIfFalse(endLabel, remaining);
+            Operand magic = context.Load(OperandType.I32, auxPtr);
+            Operand size = context.Load(OperandType.I32, context.Add(auxPtr, Const(4UL)));
+            // The normal ESR fast path needs only the exact size check below.
+            context.BranchIf(esrLabel, magic, Const(EsrMagic), Comparison.Equal);
+            // ESR cannot appear after a valid EXTRA record. Do not follow datap, even if forged.
+            context.BranchIf(endLabel, magic, Const(ExtraMagic), Comparison.Equal);
+            context.BranchIfFalse(endLabel, magic); // Null terminator or malformed null magic.
+            context.BranchIfFalse(endLabel, size); // Prevent a zero-size loop.
+            context.BranchIfTrue(endLabel, context.BitwiseAnd(size, Const(15)));
+            Operand size64 = context.ZeroExtend32(OperandType.I64, size);
+            context.BranchIf(endLabel, size64, remaining, Comparison.GreaterUI);
+            context.Copy(auxPtr, context.Add(auxPtr, size64));
+            context.Copy(remaining, context.Subtract(remaining, size64));
+            context.Branch(loopLabel);
+
+            context.MarkLabel(esrLabel);
+            context.BranchIf(endLabel, size, Const(16), Comparison.NotEqual);
+            Operand esr = context.Load(OperandType.I64, context.Add(auxPtr, Const(8UL)));
+            if (requireDataAbort)
+            {
+                Operand ec = context.BitwiseAnd(esr, Const(0xfc000000UL));
+                Operand dataAbort = context.BitwiseOr(context.ICompareEqual(ec, Const(0x90000000UL)),
+                    context.ICompareEqual(ec, Const(0x94000000UL)));
+                context.BranchIfFalse(endLabel, dataAbort);
+            }
+            context.Copy(writeFlag, context.BitwiseAnd(esr, Const(0x40UL)));
+
+            context.MarkLabel(endLabel);
+            return context.Copy(writeFlag);
+        }
+
+        private static bool IsAndroidArm64
+        {
+            get
+            {
+#if ANDROID
+                return RuntimeInformation.ProcessArchitecture == Architecture.Arm64;
+#else
+                return OperatingSystem.IsAndroid() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64;
+#endif
+            }
+        }
+
         public static byte[] GenerateUnixSignalHandler(nint signalStructPtr, int rangeStructSize)
+            => GenerateUnixSignalHandlerCore(signalStructPtr, rangeStructSize,
+                IsAndroidArm64,
+                RuntimeInformation.ProcessArchitecture);
+
+        // Same production Android IR; only the compiler target changes in host tests. No signals installed.
+        internal static byte[] GenerateAndroidFaultDispatcherForTest(nint signalStructPtr, int rangeStructSize, Architecture target)
+            => GenerateUnixSignalHandlerCore(signalStructPtr, rangeStructSize, true, target);
+
+        private static byte[] GenerateUnixSignalHandlerCore(nint signalStructPtr, int rangeStructSize, bool androidFrame, Architecture target)
         {
             EmitterContext context = new();
 
@@ -163,19 +225,43 @@ namespace ARMeilleure.Signal
             Operand sigInfoPtr = context.LoadArgument(OperandType.I64, 1);
             Operand ucontextPtr = context.LoadArgument(OperandType.I64, 2);
 
-            Operand faultAddress = GenerateUnixFaultAddress(context, sigInfoPtr);
-            Operand writeFlag = GenerateUnixWriteFlag(context, ucontextPtr);
+            bool boundedArm64Esr = androidFrame || (OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64);
+            Operand chainLabel = boundedArm64Esr ? Label() : default;
+            if (androidFrame)
+            {
+                context.BranchIfFalse(chainLabel, sigInfoPtr);
+                context.BranchIfFalse(chainLabel, ucontextPtr);
+                context.BranchIf(chainLabel, context.LoadArgument(OperandType.I32, 0), Const(11), Comparison.NotEqual);
+                Operand code = context.Load(OperandType.I32, context.Add(sigInfoPtr, Const(8UL)));
+                Operand memoryFault = context.BitwiseOr(context.ICompareEqual(code, Const(1)), context.ICompareEqual(code, Const(2)));
+                context.BranchIfFalse(chainLabel, memoryFault); // Software signals, instruction aborts and MTE are not dirty-page faults.
+            }
+            Operand faultAddress = androidFrame ? context.Load(OperandType.I64, context.Add(sigInfoPtr, Const(16UL))) : GenerateUnixFaultAddress(context, sigInfoPtr);
+            // TBI tags may be exposed by the inherited action. Match the actual VA reservation,
+            // retaining original siginfo/register tags for the previous handler and kernel return.
+            if (androidFrame) faultAddress = context.BitwiseAnd(faultAddress, Const(0x00ffffffffffffffUL));
+            Operand writeFlag = androidFrame ? GenerateLinuxArm64TrackingWriteFlag(context, ucontextPtr) : GenerateUnixWriteFlag(context, ucontextPtr);
+            if (boundedArm64Esr)
+            {
+                // Missing/malformed ESR must bypass tracking and use the existing handler chain.
+                context.BranchIf(chainLabel, writeFlag, Const(-1L), Comparison.Equal);
+            }
 
             Operand isWrite = context.ICompareNotEqual(writeFlag, Const(0L)); // Normalize to 0/1.
 
-            Operand isInRegion = EmitGenericRegionCheck(context, signalStructPtr, faultAddress, isWrite, rangeStructSize);
+            Operand isInRegion = EmitGenericRegionCheck(context, signalStructPtr, faultAddress, isWrite, rangeStructSize, androidFrame);
 
             Operand endLabel = Label();
 
             context.BranchIfTrue(endLabel, isInRegion);
 
+            if (boundedArm64Esr)
+            {
+                context.MarkLabel(chainLabel);
+            }
+
             Operand unixOldSigaction = context.Load(OperandType.I64, Const((ulong)signalStructPtr + UnixOldSigaction));
-            Operand unixOldSigaction3Arg = context.Load(OperandType.I64, Const((ulong)signalStructPtr + UnixOldSigaction3Arg));
+            Operand unixOldSigaction3Arg = context.Load(OperandType.I32, Const((ulong)signalStructPtr + UnixOldSigaction3Arg));
             Operand threeArgLabel = Label();
 
             context.BranchIfTrue(threeArgLabel, unixOldSigaction3Arg);
@@ -200,7 +286,7 @@ namespace ARMeilleure.Signal
 
             OperandType[] argTypes = [OperandType.I32, OperandType.I64, OperandType.I64];
 
-            return Compiler.Compile(cfg, argTypes, OperandType.None, CompilerOptions.HighCq, RuntimeInformation.ProcessArchitecture).Code;
+            return Compiler.Compile(cfg, argTypes, OperandType.None, CompilerOptions.HighCq, target).Code;
         }
 
         public static byte[] GenerateWindowsSignalHandler(nint signalStructPtr, int rangeStructSize)
@@ -257,11 +343,11 @@ namespace ARMeilleure.Signal
             return Compiler.Compile(cfg, argTypes, OperandType.I32, CompilerOptions.HighCq, RuntimeInformation.ProcessArchitecture).Code;
         }
 
-        private static void GenerateFaultAddressPatchCode(EmitterContext context, Operand faultAddress, Operand newAddress)
+        private static void GenerateFaultAddressPatchCode(EmitterContext context, Operand faultAddress, Operand newAddress, bool androidFrame = false)
         {
-            if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
+            if (androidFrame || RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
             {
-                if (SupportsFaultAddressPatchingForHostOs())
+                if (androidFrame || SupportsFaultAddressPatchingForHostOs())
                 {
                     Operand lblSkip = Label();
 
@@ -271,7 +357,7 @@ namespace ARMeilleure.Signal
                     Operand pcCtxAddress = default;
                     ulong baseRegsOffset = 0;
 
-                    if (OperatingSystem.IsLinux())
+                    if (androidFrame || OperatingSystem.IsLinux())
                     {
                         pcCtxAddress = context.Add(ucontextPtr, Const(440UL));
                         baseRegsOffset = 184UL;

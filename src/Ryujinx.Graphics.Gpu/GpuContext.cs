@@ -86,6 +86,33 @@ namespace Ryujinx.Graphics.Gpu
         /// </summary>
         internal ConcurrentDictionary<ulong, PhysicalMemory> PhysicalMemoryRegistry { get; }
 
+        // NEOV2-GPUMEM1: per presented frame tick of the Eden-style buffer collection.
+        internal void TickGpuMemory()
+        {
+            foreach (PhysicalMemory physicalMemory in PhysicalMemoryRegistry.Values)
+            {
+                physicalMemory.BufferCache.TickFrame();
+            }
+        }
+
+        private readonly ConcurrentQueue<Image.Texture> _ready3DUploads = new();
+
+        internal void QueueReady3DUpload(Image.Texture texture)
+        {
+            _ready3DUploads.Enqueue(texture);
+        }
+
+        internal void ProcessReady3DUploads()
+        {
+            while (_ready3DUploads.TryDequeue(out Image.Texture texture))
+            {
+                if (texture.TryApplyReady3DUpload())
+                {
+                    break;
+                }
+            }
+        }
+
         /// <summary>
         /// Support buffer updater.
         /// </summary>

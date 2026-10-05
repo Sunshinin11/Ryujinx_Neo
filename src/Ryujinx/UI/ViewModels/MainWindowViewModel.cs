@@ -1946,7 +1946,7 @@ namespace Ryujinx.Ava.UI.ViewModels
                 {
                     new(LocaleManager.Instance[LocaleKeys.AllSupportedFormats])
                     {
-                        Patterns = ["*.nsp", "*.xci", "*.nca", "*.nro", "*.nso"],
+                        Patterns = ["*.nsp", "*.nsz", "*.xci", "*.xcz", "*.nca", "*.nro", "*.nso"],
                         AppleUniformTypeIdentifiers =
                         [
                             "com.ryujinx.nsp",
@@ -2047,6 +2047,163 @@ namespace Ryujinx.Ava.UI.ViewModels
             }
         }
 
+        private async Task<bool> ConvertSolidNszIfNeeded(ApplicationData application)
+        {
+            if (application == null ||
+                string.IsNullOrWhiteSpace(application.Path) ||
+                !string.Equals(Path.GetExtension(application.Path), ".nsz", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            bool isSolid;
+
+            try
+            {
+                isSolid = NszBlockConverter.HasSolidNcz(application.Path);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error?.Print(
+                    LogClass.Loader,
+                    $"[NEOV2-NCZBLOCK-CONVERT] Detection failed: {ex}");
+
+                await ContentDialogHelper.CreateErrorDialog(
+                    "Falha ao analisar o arquivo NSZ.\n\n" +
+                    ex.Message +
+                    "\n\nO arquivo original foi mantido.");
+
+                return false;
+            }
+
+            if (!isSolid)
+            {
+                Logger.Notice.Print(
+                    LogClass.Loader,
+                    $"[NEOV2-NCZBLOCK-CONVERT] Already NCZBLOCK: {Path.GetFileName(application.Path)}");
+
+                return true;
+            }
+
+            string sourcePath = application.Path;
+            string tempPath = sourcePath + ".nczblock.part";
+
+            TaskDialog dialog = new()
+            {
+                Header = "Convertendo NSZ para NCZBLOCK",
+                SubHeader = "Preparando conversao...",
+                IconSource = new SymbolIconSource
+                {
+                    Symbol = Symbol.Download,
+                },
+                ShowProgressBar = true,
+                XamlRoot = (Window)TopLevel,
+            };
+
+            TaskCompletionSource<(bool Success, string Error)> completion =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            int started = 0;
+
+            dialog.Opened += (_, _) =>
+            {
+                if (Interlocked.Exchange(ref started, 1) != 0)
+                {
+                    return;
+                }
+
+                _ = Task.Run(() =>
+                {
+                    int lastPercent = -1;
+
+                    try
+                    {
+                        if (File.Exists(tempPath))
+                        {
+                            File.Delete(tempPath);
+                        }
+
+                        Logger.Notice.Print(
+                            LogClass.Loader,
+                            $"[NEOV2-NCZBLOCK-CONVERT] Starting automatic conversion: {sourcePath}");
+
+                        NszBlockConverter.ConvertAndVerify(
+                            sourcePath,
+                            tempPath,
+                            (percent, phase) =>
+                            {
+                                if (percent == lastPercent)
+                                {
+                                    return;
+                                }
+
+                                lastPercent = percent;
+
+                                Dispatcher.UIThread.Post(() =>
+                                {
+                                    dialog.SubHeader = $"{phase}... {percent}%";
+                                    dialog.SetProgressBarState(
+                                        percent,
+                                        TaskDialogProgressState.Normal);
+                                });
+                            });
+
+                        File.Move(tempPath, sourcePath, true);
+
+                        application.FileSize = new FileInfo(sourcePath).Length;
+
+                        Logger.Notice.Print(
+                            LogClass.Loader,
+                            $"[NEOV2-NCZBLOCK-CONVERT] Conversion verified and original replaced: {sourcePath}");
+
+                        completion.TrySetResult((true, null));
+                    }
+                    catch (Exception ex)
+                    {
+                        try
+                        {
+                            if (File.Exists(tempPath))
+                            {
+                                File.Delete(tempPath);
+                            }
+                        }
+                        catch (Exception cleanupEx)
+                        {
+                            Logger.Warning?.Print(
+                                LogClass.Loader,
+                                $"[NEOV2-NCZBLOCK-CONVERT] Temporary cleanup failed: {cleanupEx.Message}");
+                        }
+
+                        Logger.Error?.Print(
+                            LogClass.Loader,
+                            $"[NEOV2-NCZBLOCK-CONVERT] Conversion failed; original preserved: {ex}");
+
+                        completion.TrySetResult((false, ex.Message));
+                    }
+                    finally
+                    {
+                        Dispatcher.UIThread.Post(() => dialog.Hide());
+                    }
+                });
+            };
+
+            await dialog.ShowAsync(true);
+
+            (bool success, string error) = await completion.Task;
+
+            if (!success)
+            {
+                await ContentDialogHelper.CreateErrorDialog(
+                    "Falha ao converter o NSZ para NCZBLOCK.\n\n" +
+                    error +
+                    "\n\nO arquivo NSZ original foi mantido.");
+
+                return false;
+            }
+
+            return true;
+        }
+
         public async Task LoadApplication(ApplicationData application, bool startFullscreen = false)
         {
             if (AppHost != null)
@@ -2058,6 +2215,11 @@ namespace Ryujinx.Ava.UI.ViewModels
                     "",
                     LocaleManager.Instance[LocaleKeys.RyujinxInfo]);
 
+                return;
+            }
+
+            if (!await ConvertSolidNszIfNeeded(application))
+            {
                 return;
             }
 

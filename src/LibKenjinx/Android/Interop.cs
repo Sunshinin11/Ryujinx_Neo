@@ -27,7 +27,8 @@ namespace LibKenjinx.Android
             ("frameEnded", "()V"),
             ("updateProgress", "(JF)V"),
             ("getSurfacePtr", "()J"),
-            ("getWindowHandle", "()J")
+            ("getWindowHandle", "()J"),
+            ("onHostLowMemory", "()V")
         ];
 
         internal static void Initialize(JEnvRef jniEnv)
@@ -118,6 +119,12 @@ namespace LibKenjinx.Android
         public static void Test()
         {
             CallVoidMethod("test", "()V");
+        }
+
+        // NEOV2-GPUMEM1: asks the app to leave the game (normal exit path) when the Android RAM is critical.
+        public static void OnHostLowMemory()
+        {
+            CallVoidMethod("onHostLowMemory", "()V");
         }
 
         public static void FrameEnded(double time)

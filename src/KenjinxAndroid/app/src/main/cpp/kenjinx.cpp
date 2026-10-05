@@ -183,6 +183,8 @@ Java_org_kenjinx_android_NativeHelpers_loadDriver(JNIEnv *env, jobject thiz,
     auto privateAppsPath = getStringPointer(env, private_apps_path);
     auto driverName = getStringPointer(env, driver_name);
 
+    LOGI("[NativeHelpers] Carregando driver Vulkan personalizado: %s em %s", driverName, privateAppsPath);
+
     auto handle = adrenotools_open_libvulkan(
             RTLD_NOW,
             ADRENOTOOLS_DRIVER_CUSTOM,
@@ -194,11 +196,40 @@ Java_org_kenjinx_android_NativeHelpers_loadDriver(JNIEnv *env, jobject thiz,
             nullptr
     );
 
-    delete libPath;
-    delete privateAppsPath;
-    delete driverName;
+    if (handle == nullptr) {
+        LOGE("[NativeHelpers] FALHA: adrenotools_open_libvulkan() retornou nullptr para '%s'. Realizando fallback seguro para o driver do sistema.", driverName);
+    } else {
+        LOGI("[NativeHelpers] SUCESSO: Driver personalizado '%s' carregado via adrenotools (handle: %p).", driverName, handle);
+    }
+
+    delete[] libPath;
+    delete[] privateAppsPath;
+    delete[] driverName;
 
     return (jlong) handle;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_org_kenjinx_android_NativeHelpers_setDriverEnvironmentVariable(JNIEnv *env, jobject thiz,
+                                                                    jstring name, jstring value) {
+    if (name == nullptr || value == nullptr)
+        return JNI_FALSE;
+
+    auto varName = getStringPointer(env, name);
+    auto varValue = getStringPointer(env, value);
+
+    int result = setenv(varName, varValue, 1);
+    if (result == 0) {
+        LOGI("[NativeHelpers] Variavel de driver configurada: %s=%s", varName, varValue);
+    } else {
+        LOGE("[NativeHelpers] Falha ao configurar variavel de driver: %s", varName);
+    }
+
+    delete[] varName;
+    delete[] varValue;
+
+    return result == 0 ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C"

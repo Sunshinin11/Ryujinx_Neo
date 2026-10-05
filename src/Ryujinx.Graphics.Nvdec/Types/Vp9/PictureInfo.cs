@@ -53,6 +53,7 @@ namespace Ryujinx.Graphics.Nvdec.Types.Vp9
                 IsKeyFrame = Flags.HasFlag(FrameFlags.IsKeyFrame),
                 IntraOnly = Flags.HasFlag(FrameFlags.IntraOnly),
                 UsePrevInFindMvRefs =
+                    !Flags.HasFlag(FrameFlags.IsKeyFrame) && // NEOV2-VP9RYU132 (Ryubing #132)
                     !Flags.HasFlag(FrameFlags.ErrorResilientMode) &&
                     !Flags.HasFlag(FrameFlags.FrameSizeChanged) &&
                     !Flags.HasFlag(FrameFlags.IntraOnly) &&

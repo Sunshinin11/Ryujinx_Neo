@@ -10,13 +10,14 @@ namespace Ryujinx.Cpu
     /// A page bitmap that keeps track of mapped state and tracking protection
     /// for managed memory accesses (not using host page protection).
     /// </summary>
-    internal readonly struct ManagedPageFlags
+    internal struct ManagedPageFlags
     {
         public const int PageBits = 12;
         public const int PageSize = 1 << PageBits;
         public const int PageMask = PageSize - 1;
 
         private readonly ulong[] _pageBitmap;
+        public ulong NceTrackingAddressOffset;
 
         public const int PageToPteShift = 5; // 32 pages (2 bits each) in one ulong page table entry.
         public const ulong BlockMappedMask = 0x5555555555555555; // First bit of each table entry set.
@@ -37,6 +38,7 @@ namespace Ryujinx.Cpu
         {
             int bits = Math.Max(0, addressSpaceBits - (PageBits + PageToPteShift));
             _pageBitmap = new ulong[1 << bits];
+            NceTrackingAddressOffset = 0;
         }
 
         /// <summary>
@@ -251,7 +253,7 @@ namespace Ryujinx.Cpu
 
                 if (state >= tag)
                 {
-                    tracking.VirtualMemoryEvent(va, size, write, precise: false, exemptId);
+                    tracking.VirtualMemoryEvent(va + NceTrackingAddressOffset, size, write, precise: false, exemptId);
                     return;
                 }
                 else if (state == 0)
@@ -294,7 +296,7 @@ namespace Ryujinx.Cpu
                         // Only trigger tracking from reads if both bits are set on any page.
                         if (write || (pte & (pte >> 1) & BlockMappedMask) != 0)
                         {
-                            tracking.VirtualMemoryEvent(va, size, write, precise: false, exemptId);
+                            tracking.VirtualMemoryEvent(va + NceTrackingAddressOffset, size, write, precise: false, exemptId);
                             break;
                         }
                     }

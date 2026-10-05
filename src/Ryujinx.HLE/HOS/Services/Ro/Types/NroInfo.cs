@@ -13,6 +13,7 @@ namespace Ryujinx.HLE.HOS.Services.Ro
         public ulong BssSize { get; private set; }
         public ulong TotalSize { get; private set; }
         public ulong NroMappedAddress { get; set; }
+        internal NroNceMapping NceMapping { get; set; }
 
         public NroInfo(
             NroExecutable executable,

@@ -1,8 +1,10 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Memory.Range;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace Ryujinx.Graphics.Gpu.Memory
 {
@@ -31,6 +33,18 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
         private const ulong MaxDynamicGrowthSize = 0x100000;
 
+        private const int TranslationCacheSize = 2048;
+        private const int TranslationCacheMask = TranslationCacheSize - 1;
+
+        private struct TranslationCacheEntry
+        {
+            public MemoryManager MemoryManager;
+            public ulong GpuVa;
+            public ulong Size;
+            public ulong Address;
+            public int Sequence;
+        }
+
         private readonly GpuContext _context;
         private readonly PhysicalMemory _physicalMemory;
 
@@ -43,8 +57,15 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
         private readonly Dictionary<ulong, BufferCacheEntry> _dirtyCache;
         private readonly Dictionary<ulong, BufferCacheEntry> _modifiedCache;
+        private readonly TranslationCacheEntry[] _translationCache;
         private bool _pruneCaches;
+        private int _translationCacheSequence;
+        private ulong _translationCacheCalls;
+        private ulong _translationCacheHits;
         private int _virtualModifiedSequenceNumber;
+
+        // NEOV2-GPUMEM1: Eden-style buffer garbage collection ("Memoria de GPU estilo Eden").
+        private ulong _frameTick;
 
         public event Action NotifyBuffersModified;
 
@@ -62,6 +83,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
             _multiRangeBuffers = [];
 
             _dirtyCache = new Dictionary<ulong, BufferCacheEntry>();
+            _translationCache = new TranslationCacheEntry[TranslationCacheSize];
 
             // There are a lot more entries on the modified cache, so it is separate from the one for ForceDirty.
             _modifiedCache = new Dictionary<ulong, BufferCacheEntry>();
@@ -105,7 +127,40 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 return new MultiRange(MemoryManager.PteUnmapped, size);
             }
 
-            ulong address = memoryManager.Translate(gpuVa);
+            int sequence = Volatile.Read(ref _translationCacheSequence);
+            int cacheIndex = (int)(((gpuVa >> 8) ^ (gpuVa >> 20)) & TranslationCacheMask);
+            ref TranslationCacheEntry entry = ref _translationCache[cacheIndex];
+
+            ulong calls = ++_translationCacheCalls;
+            ulong address;
+
+            if (entry.Sequence == sequence &&
+                ReferenceEquals(entry.MemoryManager, memoryManager) &&
+                entry.GpuVa == gpuVa &&
+                entry.Size == size)
+            {
+                address = entry.Address;
+                _translationCacheHits++;
+
+                if ((calls & 0xfffff) == 0)
+                {
+                    Logger.Info?.Print(LogClass.Gpu, $"[NEOV2-BUFFER-TRANSCACHE1] calls={calls} hits={_translationCacheHits}");
+                }
+            }
+            else
+            {
+                address = memoryManager.Translate(gpuVa);
+                entry.MemoryManager = memoryManager;
+                entry.GpuVa = gpuVa;
+                entry.Size = size;
+                entry.Address = address;
+                entry.Sequence = sequence;
+
+                if ((calls & 0xfffff) == 0)
+                {
+                    Logger.Info?.Print(LogClass.Gpu, $"[NEOV2-BUFFER-TRANSCACHE1] calls={calls} hits={_translationCacheHits}");
+                }
+            }
 
             if (address != MemoryManager.PteUnmapped)
             {
@@ -434,6 +489,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 _dirtyCache[gpuVa] = result;
             }
 
+            result.Buffer.LastUseFrame = _frameTick;
             result.Buffer.ForceDirty(result.Address, size);
         }
 
@@ -469,6 +525,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 _modifiedCache[alignedGpuVa] = result;
             }
 
+            result.Buffer.LastUseFrame = _frameTick;
             outAddr = result.Address | (gpuVa & mask);
 
             return result.Buffer.IsModified(result.Address, size);
@@ -544,7 +601,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
             else
             {
                 // No overlap, just create a new buffer.
-                _buffers.Add(new(_context, _physicalMemory, address, size, stage, sparseCompatible: false, []));
+                Buffer newBuffer = new(_context, _physicalMemory, address, size, stage, sparseCompatible: false, []);
+                newBuffer.LastUseFrame = _frameTick;
+                _buffers.Add(newBuffer);
             }
         }
 
@@ -607,7 +666,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
             else
             {
                 // No overlap, just create a new buffer.
-                _buffers.Add(new(_context, _physicalMemory, address, size, stage, sparseAligned, []));
+                Buffer newBuffer = new(_context, _physicalMemory, address, size, stage, sparseAligned, []);
+                newBuffer.LastUseFrame = _frameTick;
+                _buffers.Add(newBuffer);
             } 
         }
 
@@ -624,6 +685,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
         private Buffer CreateBufferAligned(ulong address, ulong size, BufferStage stage, bool sparseCompatible, Buffer[] overlaps)
         {
             Buffer newBuffer = new(_context, _physicalMemory, address, size, stage, sparseCompatible, overlaps);
+            newBuffer.LastUseFrame = _frameTick;
 
             for (int index = 0; index < overlaps.Length; index++)
             {
@@ -685,7 +747,59 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="srcVa">GPU virtual address of the copy source</param>
         /// <param name="dstVa">GPU virtual address of the copy destination</param>
         /// <param name="size">Size in bytes of the copy</param>
+        private const ulong CpuDmaMinSize = 16UL * 1024 * 1024;
+        private const ulong CpuDmaChunkSize = 16UL * 1024 * 1024;
+
+        private bool CanUseCpuDma(MemoryManager memoryManager, ulong gpuVa, ulong size)
+        {
+            MultiRange range = memoryManager.GetPhysicalRegions(gpuVa, size);
+
+            for (int i = 0; i < range.Count; i++)
+            {
+                MemoryRange subRange = range.GetSubRange(i);
+
+                if (subRange.Address == MemoryManager.PteUnmapped)
+                {
+                    return false;
+                }
+
+                if (_buffers.FindOverlapsAsSpan(subRange.Address, subRange.Size).Length != 0)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         public void CopyBuffer(MemoryManager memoryManager, ulong srcVa, ulong dstVa, ulong size)
+        {
+            // NEOV2-DMACPU1: Eden's BufferCache::DMACopy only uses the GPU when the memory already has buffers.
+            if (!GraphicsConfig.EdenGpuMemory || size < CpuDmaMinSize || (srcVa < dstVa + size && dstVa < srcVa + size))
+            {
+                CopyBufferGpu(memoryManager, srcVa, dstVa, size);
+                return;
+            }
+
+            for (ulong offset = 0; offset < size; offset += CpuDmaChunkSize)
+            {
+                ulong chunk = Math.Min(CpuDmaChunkSize, size - offset);
+
+                if (!CanUseCpuDma(memoryManager, srcVa + offset, chunk) || !CanUseCpuDma(memoryManager, dstVa + offset, chunk))
+                {
+                    CopyBufferGpu(memoryManager, srcVa + offset, dstVa + offset, chunk);
+                    continue;
+                }
+
+                // Tracked read: GPU modified textures over the source are flushed to guest memory first.
+                ReadOnlySpan<byte> data = memoryManager.GetSpan(srcVa + offset, (int)chunk, tracked: true);
+                memoryManager.WriteTrackedResource(dstVa + offset, data);
+
+            }
+
+        }
+
+        private void CopyBufferGpu(MemoryManager memoryManager, ulong srcVa, ulong dstVa, ulong size)
         {
             MultiRange srcRange = TranslateAndCreateMultiBuffersPhysicalOnly(memoryManager, srcVa, size, BufferStage.Copy);
             MultiRange dstRange = TranslateAndCreateMultiBuffersPhysicalOnly(memoryManager, dstVa, size, BufferStage.Copy);
@@ -757,7 +871,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 dstOffset,
                 (int)size);
 
-            if (srcBuffer.IsModified(srcAddress, size))
+            // NEOV2 DMA-RELAX1: com o readback relaxado, a copia fica so na GPU (como quando a origem ja foi
+            // modificada pela GPU), sem a escrita na CPU que obriga a baixar as texturas sobrepostas ao destino.
+            if (GraphicsConfig.RelaxedDmaCopy || srcBuffer.IsModified(srcAddress, size))
             {
                 dstBuffer.SignalModified(dstAddress, size, BufferStage.Copy);
             }
@@ -783,6 +899,39 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="size">Number of bytes to clear</param>
         /// <param name="value">Value to be written into the buffer</param>
         public void ClearBuffer(MemoryManager memoryManager, ulong gpuVa, ulong size, uint value)
+        {
+            // NEOV2-DMACPU1: Eden's BufferCache::DMAClear only clears on the GPU when the memory already has buffers.
+            if (!GraphicsConfig.EdenGpuMemory || size < CpuDmaMinSize)
+            {
+                ClearBufferGpu(memoryManager, gpuVa, size, value);
+                return;
+            }
+
+            for (ulong offset = 0; offset < size; offset += CpuDmaChunkSize)
+            {
+                ulong chunk = Math.Min(CpuDmaChunkSize, size - offset);
+
+                if (!CanUseCpuDma(memoryManager, gpuVa + offset, chunk))
+                {
+                    ClearBufferGpu(memoryManager, gpuVa + offset, chunk, value);
+                    continue;
+                }
+
+                MultiRange range = memoryManager.GetPhysicalRegions(gpuVa + offset, chunk);
+
+                for (int index = 0; index < range.Count; index++)
+                {
+                    MemoryRange subRange = range.GetSubRange(index);
+
+                    // Same guest memory fill the GPU path does after clearing the host buffer; textures over it are signalled.
+                    memoryManager.Physical.FillTrackedResource(subRange.Address, subRange.Size, value, ResourceKind.Buffer);
+                }
+
+            }
+
+        }
+
+        private void ClearBufferGpu(MemoryManager memoryManager, ulong gpuVa, ulong size, uint value)
         {
             MultiRange range = TranslateAndCreateMultiBuffersPhysicalOnly(memoryManager, gpuVa, size, BufferStage.Copy);
 
@@ -855,8 +1004,10 @@ namespace Ryujinx.Graphics.Gpu.Memory
             {
                 MemoryRange subRange = range.GetSubRange(i);
 
-                Buffer subBuffer = _buffers.FindOverlap(subRange.Address, subRange.Size);
+                Buffer subBuffer = _buffers.FindOverlap(subRange.Address, subRange.Size)
+                    ?? CreateMissingBuffer(subRange.Address, subRange.Size, stage, SparseBufferAlignmentSize);
 
+                subBuffer.LastUseFrame = _frameTick;
                 subBuffer.SynchronizeMemory(subRange.Address, subRange.Size);
 
                 if (write)
@@ -903,8 +1054,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
             if (size != 0)
             {
-                buffer = _buffers.FindOverlap(address, size);
+                buffer = _buffers.FindOverlap(address, size) ?? CreateMissingBuffer(address, size, stage, 0);
 
+                buffer.LastUseFrame = _frameTick;
                 buffer.CopyFromDependantVirtualBuffers();
                 buffer.SynchronizeMemory(address, size);
 
@@ -953,7 +1105,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
         {
             if (size != 0)
             {
-                Buffer buffer = _buffers.FindOverlap(address, size);
+                Buffer buffer = _buffers.FindOverlap(address, size) ?? CreateMissingBuffer(address, size, BufferStage.None, 0);
+
+                buffer.LastUseFrame = _frameTick;
 
                 if (copyBackVirtual)
                 {
@@ -1022,6 +1176,120 @@ namespace Ryujinx.Graphics.Gpu.Memory
         public void QueuePrune()
         {
             _pruneCaches = true;
+            Interlocked.Increment(ref _translationCacheSequence);
+        }
+
+        /// <summary>
+        /// NEOV2-GPUMEM1: recreates a buffer that was deleted by the garbage collector while a binding still
+        /// points to its range. The data is reloaded from guest memory (GPU modifications are synchronized before collection).
+        /// </summary>
+        private Buffer CreateMissingBuffer(ulong address, ulong size, BufferStage stage, ulong alignment)
+        {
+            if (alignment != 0)
+            {
+                CreateBuffer(address, size, stage, alignment);
+            }
+            else
+            {
+                CreateBuffer(address, size, stage);
+            }
+
+            return _buffers.FindOverlap(address, size);
+        }
+
+        /// <summary>
+        /// NEOV2-GPUMEM1: per frame tick. With "Memoria de GPU estilo Eden" enabled, deletes buffers that were not
+        /// used recently once the device memory reaches Eden's thresholds (BufferCache::RunGarbageCollector:
+        /// 120 frames unused, or 60 frames and twice as many per tick when aggressive).
+        /// Modified buffers are written back before deletion, with at most one readback per tick.
+        /// </summary>
+        public void TickFrame()
+        {
+            _frameTick++;
+
+            if (!GraphicsConfig.EdenGpuMemory)
+            {
+                return;
+            }
+
+            long total = GpuMemoryStats.TotalBytes;
+            int hostPressure = GpuMemoryStats.HostPressureLevel;
+
+            if (total < GpuMemoryStats.ExpectedBytes && hostPressure == 0)
+            {
+                return;
+            }
+
+            bool aggressive = hostPressure != 0 || total >= GpuMemoryStats.CriticalBytes;
+            ulong ticksToDestroy = hostPressure >= 2 ? 2UL : (aggressive ? 60UL : 120UL);
+            int maxEvictions = hostPressure >= 2 ? 512 : (aggressive ? 64 : 32);
+
+            if (_frameTick <= ticksToDestroy)
+            {
+                return;
+            }
+
+            ulong threshold = _frameTick - ticksToDestroy;
+
+            List<Buffer> candidates = null;
+
+            foreach (Buffer buffer in _buffers)
+            {
+                if (buffer.LastUseFrame < threshold && buffer.CanBeginEviction)
+                {
+                    candidates ??= new List<Buffer>();
+                    candidates.Add(buffer);
+                }
+            }
+
+            if (candidates == null)
+            {
+                return;
+            }
+
+            candidates.Sort(static (a, b) => a.LastUseFrame.CompareTo(b.LastUseFrame));
+
+            int evicted = 0;
+            int readbacks = 0;
+
+            for (int index = 0; index < candidates.Count && evicted < maxEvictions; index++)
+            {
+                Buffer buffer = candidates[index];
+                bool modified = buffer.HasModifiedData;
+
+                if (modified && readbacks >= 1)
+                {
+                    continue;
+                }
+
+                bool ready = buffer.TryPrepareForEviction();
+
+                if (modified)
+                {
+                    readbacks++;
+                }
+
+                // A partial flush or a newly modified range must never be discarded.
+                if (!ready)
+                {
+                    continue;
+                }
+
+                if (_buffers.Remove(buffer))
+                {
+                    evicted++;
+                    buffer.Dispose();
+                }
+            }
+
+            if (evicted == 0 && readbacks == 0)
+            {
+                return;
+            }
+
+            // Bindings may still reference the deleted host buffers; force them to be resolved again.
+            NotifyBuffersModified?.Invoke();
+            QueuePrune();
         }
 
         /// <summary>

@@ -151,6 +151,9 @@ namespace LibKenjinx
             {
                 try
                 {
+                    // NEOV2-NCZ1: nsz/xcz seguem o caminho de nsp/xci.
+                    extension = NczSupport.NormalizeExtension(extension);
+
                     if (extension is "nsp" or "pfs0" or "xci")
                     {
                         IFileSystem pfs;
@@ -161,13 +164,13 @@ namespace LibKenjinx
                         {
                             Xci xci = new(SwitchDevice.VirtualFileSystem.KeySet, gameStream.AsStorage());
 
-                            pfs = xci.OpenPartition(XciPartitionType.Secure);
+                            pfs = NczSupport.WrapIfCompressed(xci.OpenPartition(XciPartitionType.Secure));
                         }
                         else
                         {
                             PartitionFileSystem pfsTemp = new();
                             pfsTemp.Initialize(gameStream.AsStorage()).ThrowIfFailure();
-                            pfs = pfsTemp;
+                            pfs = NczSupport.WrapIfCompressed(pfsTemp);
 
                             // If the NSP doesn't have a main NCA, decrement the number of applications found and then continue to the next application.
                             bool hasMainNca = false;
@@ -530,7 +533,7 @@ namespace LibKenjinx
                             FileStream file = new(updatePath, FileMode.Open, FileAccess.Read);
                             IFileSystem pfs;
 
-                            if (Path.GetExtension(updatePath).ToLower() == ".xci")
+                            if (NczSupport.IsXciExtension(Path.GetExtension(updatePath)))
                             {
                                 pfs = new Xci(fileSystem.KeySet, file.AsStorage()).OpenPartition(XciPartitionType.Secure);
                             }
@@ -541,6 +544,9 @@ namespace LibKenjinx
                                 pfsTemp.Initialize(file.AsStorage()).ThrowIfFailure();
                                 pfs = pfsTemp;
                             }
+
+                            // NEOV2-NCZ1: atualizacao em NSZ/XCZ.
+                            pfs = NczSupport.WrapIfCompressed(pfs);
 
                             return GetGameUpdateDataFromPartition(fileSystem, pfs, titleIdBase.ToString("x16"), programIndex);
                         }
@@ -617,9 +623,12 @@ namespace LibKenjinx
 
                 SwitchDevice?.VirtualFileSystem.ImportTickets(partitionFileSystem);
 
+                // NEOV2-NCZ1: DLC em NSZ.
+                IFileSystem dlcFileSystem = NczSupport.WrapIfCompressed(partitionFileSystem);
+
                 using UniqueRef<IFile> ncaFile = new();
 
-                partitionFileSystem.OpenFile(ref ncaFile.Ref, ncaPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                dlcFileSystem.OpenFile(ref ncaFile.Ref, ncaPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
 
                 if (TryOpenNca(ncaFile.Get.AsStorage(), ncaPath) is { } nca)
                 {
@@ -659,11 +668,14 @@ namespace LibKenjinx
             SwitchDevice?.VirtualFileSystem.ImportTickets(partitionFileSystem);
             List<string> paths = [];
 
-            foreach (DirectoryEntryEx fileEntry in partitionFileSystem.EnumerateEntries("/", "*.nca"))
+            // NEOV2-NCZ1: DLC em NSZ.
+            IFileSystem dlcFileSystem = NczSupport.WrapIfCompressed(partitionFileSystem);
+
+            foreach (DirectoryEntryEx fileEntry in dlcFileSystem.EnumerateEntries("/", "*.nca"))
             {
                 using UniqueRef<IFile> ncaFile = new();
 
-                partitionFileSystem.OpenFile(ref ncaFile.Ref, fileEntry.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                dlcFileSystem.OpenFile(ref ncaFile.Ref, fileEntry.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
 
                 Nca? nca = TryOpenNca(ncaFile.Get.AsStorage(), path);
                 if (nca == null)

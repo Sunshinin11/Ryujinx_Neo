@@ -1,3 +1,4 @@
+using System;
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -27,6 +28,21 @@ namespace Ryujinx.Common.Utilities
         }
 
         public static (IPInterfaceProperties, UnicastIPAddressInformation) GetLocalInterface(string lanInterfaceId = "0")
+        {
+            // NEOV2 NIFM-ANDROID1: no Android o .NET nao fornece GatewayAddresses/DnsAddresses e lanca
+            // PlatformNotSupportedException quando ha rede ativa, derrubando o servico nifm (ex.: Diablo II nao abre
+            // com Wi-Fi ligado). Nesse caso o jogo passa a ver o console como sem rede, igual ao Wi-Fi desligado.
+            try
+            {
+                return GetLocalInterfaceImpl(lanInterfaceId);
+            }
+            catch (PlatformNotSupportedException)
+            {
+                return (null, null);
+            }
+        }
+
+        private static (IPInterfaceProperties, UnicastIPAddressInformation) GetLocalInterfaceImpl(string lanInterfaceId)
         {
             if (!NetworkInterface.GetIsNetworkAvailable())
             {

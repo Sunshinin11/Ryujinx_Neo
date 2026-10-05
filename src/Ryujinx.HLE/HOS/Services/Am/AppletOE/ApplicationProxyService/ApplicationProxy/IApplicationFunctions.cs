@@ -133,6 +133,301 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
             return (ResultCode)result.Value;
         }
 
+        // NEOV2-LANG1: ordem de preferencia de idiomas do console (ns, language.cpp do yuzu/Eden),
+        // indexada por TitleLanguage. Ex.: Portugues do Brasil cai para Portugues antes do ingles.
+        private static readonly TitleLanguage[][] _languagePriorityLists =
+        [
+            // AmericanEnglish
+            [
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.French,
+                TitleLanguage.German,
+                TitleLanguage.Spanish,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.Portuguese,
+                TitleLanguage.Russian,
+                TitleLanguage.Japanese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.Korean,
+            ],
+            // BritishEnglish
+            [
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.French,
+                TitleLanguage.German,
+                TitleLanguage.Spanish,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.Portuguese,
+                TitleLanguage.Russian,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.Japanese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.Korean,
+            ],
+            // Japanese
+            [
+                TitleLanguage.Japanese,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.French,
+                TitleLanguage.German,
+                TitleLanguage.Spanish,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.Portuguese,
+                TitleLanguage.Russian,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.Korean,
+            ],
+            // French
+            [
+                TitleLanguage.French,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.German,
+                TitleLanguage.Spanish,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.Portuguese,
+                TitleLanguage.Russian,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.Japanese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.Korean,
+            ],
+            // German
+            [
+                TitleLanguage.German,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.French,
+                TitleLanguage.Spanish,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.Portuguese,
+                TitleLanguage.Russian,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.Japanese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.Korean,
+            ],
+            // LatinAmericanSpanish
+            [
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.Spanish,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.Portuguese,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.French,
+                TitleLanguage.Italian,
+                TitleLanguage.German,
+                TitleLanguage.Dutch,
+                TitleLanguage.Russian,
+                TitleLanguage.Japanese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.Korean,
+            ],
+            // Spanish
+            [
+                TitleLanguage.Spanish,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.French,
+                TitleLanguage.German,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.Portuguese,
+                TitleLanguage.Russian,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.Japanese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.Korean,
+            ],
+            // Italian
+            [
+                TitleLanguage.Italian,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.French,
+                TitleLanguage.German,
+                TitleLanguage.Spanish,
+                TitleLanguage.Dutch,
+                TitleLanguage.Portuguese,
+                TitleLanguage.Russian,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.Japanese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.Korean,
+            ],
+            // Dutch
+            [
+                TitleLanguage.Dutch,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.French,
+                TitleLanguage.German,
+                TitleLanguage.Spanish,
+                TitleLanguage.Italian,
+                TitleLanguage.Portuguese,
+                TitleLanguage.Russian,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.Japanese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.Korean,
+            ],
+            // CanadianFrench
+            [
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.French,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.Spanish,
+                TitleLanguage.German,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.Portuguese,
+                TitleLanguage.Russian,
+                TitleLanguage.Japanese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.Korean,
+            ],
+            // Portuguese
+            [
+                TitleLanguage.Portuguese,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.French,
+                TitleLanguage.German,
+                TitleLanguage.Spanish,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.Russian,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.Japanese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.Korean,
+            ],
+            // Russian
+            [
+                TitleLanguage.Russian,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.French,
+                TitleLanguage.German,
+                TitleLanguage.Spanish,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.Portuguese,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.Japanese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.Korean,
+            ],
+            // Korean
+            [
+                TitleLanguage.Korean,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.French,
+                TitleLanguage.German,
+                TitleLanguage.Spanish,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.Portuguese,
+                TitleLanguage.Russian,
+                TitleLanguage.Japanese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+            ],
+            // TraditionalChinese
+            [
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.Japanese,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.French,
+                TitleLanguage.German,
+                TitleLanguage.Spanish,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.Portuguese,
+                TitleLanguage.Russian,
+                TitleLanguage.Korean,
+            ],
+            // SimplifiedChinese
+            [
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.Japanese,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.French,
+                TitleLanguage.German,
+                TitleLanguage.Spanish,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.Portuguese,
+                TitleLanguage.Russian,
+                TitleLanguage.Korean,
+            ],
+            // BrazilianPortuguese
+            [
+                TitleLanguage.BrazilianPortuguese,
+                TitleLanguage.Portuguese,
+                TitleLanguage.LatinAmericanSpanish,
+                TitleLanguage.AmericanEnglish,
+                TitleLanguage.BritishEnglish,
+                TitleLanguage.Japanese,
+                TitleLanguage.French,
+                TitleLanguage.German,
+                TitleLanguage.Spanish,
+                TitleLanguage.Italian,
+                TitleLanguage.Dutch,
+                TitleLanguage.CanadianFrench,
+                TitleLanguage.Russian,
+                TitleLanguage.Korean,
+                TitleLanguage.SimplifiedChinese,
+                TitleLanguage.TraditionalChinese,
+            ],
+        ];
+
         [CommandCmif(21)]
         // GetDesiredLanguage() -> nn::settings::LanguageCode
         public ResultCode GetDesiredLanguage(ServiceCtx context)
@@ -155,11 +450,24 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
                 return ResultCode.Success;
             }
 
-            // If desired language is not supported by application, use first supported language from TitleLanguage.
-            // TODO: In the future, a GUI could enable user-specified search priority
-            if (((1 << (int)context.Device.System.State.DesiredTitleLanguage) & supportedLanguages) == 0)
+            // NEOV2-LANG1: if the desired language is not supported by the application, follow the console's
+            // priority list for that language (e.g. BrazilianPortuguese -> Portuguese) before the first supported one.
+            TitleLanguage desiredTitleLanguage = context.Device.System.State.DesiredTitleLanguage;
+
+            if (((1 << (int)desiredTitleLanguage) & supportedLanguages) == 0)
             {
-                SystemLanguage newLanguage = Enum.Parse<SystemLanguage>(Enum.GetName(typeof(TitleLanguage), firstSupported));
+                TitleLanguage fallbackLanguage = (TitleLanguage)firstSupported;
+
+                foreach (TitleLanguage candidate in _languagePriorityLists[(int)desiredTitleLanguage])
+                {
+                    if (((1 << (int)candidate) & supportedLanguages) != 0)
+                    {
+                        fallbackLanguage = candidate;
+                        break;
+                    }
+                }
+
+                SystemLanguage newLanguage = Enum.Parse<SystemLanguage>(Enum.GetName(typeof(TitleLanguage), fallbackLanguage));
                 desiredLanguageCode = SystemStateMgr.GetLanguageCode((int)newLanguage);
 
                 Logger.Info?.Print(LogClass.ServiceAm, $"Application doesn't support configured language. Using {newLanguage}");

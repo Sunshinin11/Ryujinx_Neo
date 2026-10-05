@@ -107,7 +107,85 @@ namespace Ryujinx.Graphics.Gpu.Image
         public int InvalidatedSequence { get; private set; }
 
         private int _depth;
-        private int _layers;
+                private int _layers;
+
+        // NEOV2 EDEN3D1: upload assincrono de texturas 3D grandes (estilo Eden QueueAsyncUnswizzle).
+        private const int Eden3DMinBytes = 4 * 1024 * 1024;
+        private int _eden3dGeneration;
+        private Eden3DPendingUpload _eden3dPending;
+        private bool _eden3dResyncNeeded;
+
+        private sealed class Eden3DPendingUpload
+        {
+            public readonly int Generation;
+            public readonly ITexture Target;
+            public readonly string Detail;
+            public readonly long StartTicks;
+            private MemoryOwner<byte> _result;
+            private bool _resultTaken;
+            private bool _disposed;
+            public int Done;
+
+            public Eden3DPendingUpload(int generation, ITexture target, string detail = null)
+            {
+                Generation = generation;
+                Target = target;
+                Detail = detail ?? string.Empty;
+                StartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+
+            public void SetResult(MemoryOwner<byte> result)
+            {
+                bool disposeResult;
+                lock (this)
+                {
+                    disposeResult = _disposed;
+                    if (!disposeResult)
+                    {
+                        _result = result;
+                    }
+                }
+
+                if (disposeResult)
+                {
+                    result?.Dispose();
+                }
+            }
+
+            public MemoryOwner<byte> TryTakeResult()
+            {
+                lock (this)
+                {
+                    if (_resultTaken || _disposed)
+                    {
+                        return null;
+                    }
+
+                    _resultTaken = true;
+                    MemoryOwner<byte> res = _result;
+                    _result = null;
+                    return res;
+                }
+            }
+
+            public void DisposeResult()
+            {
+                MemoryOwner<byte> toDispose = null;
+                lock (this)
+                {
+                    if (!_disposed)
+                    {
+                        _disposed = true;
+                        if (!_resultTaken)
+                        {
+                            toDispose = _result;
+                            _result = null;
+                        }
+                    }
+                }
+                toDispose?.Dispose();
+            }
+        }
         public int FirstLayer { get; private set; }
         public int FirstLevel { get; private set; }
 
@@ -138,6 +216,11 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// Intrusive linked list node used on the auto deletion texture cache.
         /// </summary>
         public LinkedListNode<Texture> CacheNode { get; set; }
+
+        /// <summary>
+        /// NEOV2-GPUMEM1: last auto delete cache frame where this texture was used (Eden-style collection).
+        /// </summary>
+        public ulong CacheLastUseFrame;
 
         /// <summary>
         /// Entry for this texture in the short duration cache, if present.
@@ -597,6 +680,11 @@ namespace Ryujinx.Graphics.Gpu.Image
                 return;
             }
 
+            if (_eden3dPending != null)
+            {
+                TryApplyEden3DUpload();
+            }
+
             if (!_dirty)
             {
                 return;
@@ -604,7 +692,14 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             _dirty = false;
 
-            if (_hasData)
+            if (_eden3dPending != null)
+            {
+                if (Group.CheckDirty(this, true))
+                {
+                    _eden3dResyncNeeded = true;
+                }
+            }
+            else if (_hasData)
             {
                 Group.SynchronizeMemory(this);
             }
@@ -638,6 +733,14 @@ namespace Ryujinx.Graphics.Gpu.Image
         public void SynchronizeFull()
         {
             ReadOnlySpan<byte> data = _physicalMemory.GetSpan(Range);
+
+            if (TryStartEden3DUpload(data))
+            {
+                return;
+            }
+
+            InvalidateEden3DUpload();
+            _eden3dResyncNeeded = false;
 
             // If the host does not support ASTC compression, we need to do the decompression.
             // The decompression is slow, so we want to avoid it as much as possible.
@@ -688,6 +791,8 @@ namespace Ryujinx.Graphics.Gpu.Image
         {
             BlacklistScale();
 
+            InvalidateEden3DUpload();
+
             Group.CheckDirty(this, true);
 
             AlwaysFlushOnOverlap = true;
@@ -707,6 +812,8 @@ namespace Ryujinx.Graphics.Gpu.Image
         {
             BlacklistScale();
 
+            InvalidateEden3DUpload();
+
             HostTexture.SetData(data, layer, level);
 
             _currentData = null;
@@ -724,6 +831,8 @@ namespace Ryujinx.Graphics.Gpu.Image
         public void SetData(MemoryOwner<byte> data, int layer, int level, Rectangle<int> region)
         {
             BlacklistScale();
+
+            InvalidateEden3DUpload();
 
             HostTexture.SetData(data, layer, level, region);
 
@@ -1451,6 +1560,8 @@ namespace Ryujinx.Graphics.Gpu.Image
         {
             _scaledSetScore = Math.Max(0, _scaledSetScore - 1);
 
+            InvalidateEden3DUpload();
+
             if (_modifiedStale || Group.HasCopyDependencies)
             {
                 _modifiedStale = false;
@@ -1471,6 +1582,8 @@ namespace Ryujinx.Graphics.Gpu.Image
             {
                 _scaledSetScore = Math.Max(0, _scaledSetScore - 1);
             }
+
+            InvalidateEden3DUpload();
 
             if (_modifiedStale || Group.HasCopyDependencies || Group.HasFlushBuffer)
             {
@@ -1721,6 +1834,8 @@ namespace Ryujinx.Graphics.Gpu.Image
         {
             InvalidatedSequence++;
 
+            InvalidateEden3DUpload();
+
             _currentData = null;
             HostTexture.Release();
 
@@ -1760,6 +1875,125 @@ namespace Ryujinx.Graphics.Gpu.Image
             if (Group.Storage == this)
             {
                 Group.Dispose();
+            }
+        }
+        private bool TryStartEden3DUpload(ReadOnlySpan<byte> data)
+        {
+            if (!GraphicsConfig.AsyncLarge3DTextureUpload ||
+                Target != Target.Texture3D ||
+                data.Length < Eden3DMinBytes ||
+                ScaleFactor != 1f ||
+                (Group != null && Group.Storage != this))
+            {
+                return false;
+            }
+
+            MemoryOwner<byte> copy = MemoryOwner<byte>.RentCopy(data);
+            int generation = System.Threading.Interlocked.Increment(ref _eden3dGeneration);
+            Eden3DPendingUpload pending = new(generation, HostTexture);
+
+            Eden3DPendingUpload previous = System.Threading.Interlocked.Exchange(ref _eden3dPending, pending);
+            previous?.DisposeResult();
+
+            _currentData = null;
+            _hasData = true;
+
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                MemoryOwner<byte> result = null;
+
+                try
+                {
+                    result = ConvertToHostCompatibleFormat(copy.Span);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warning?.Print(LogClass.Gpu, $"Failed async 3D texture conversion: {ex.GetType().Name}: {ex.Message}");
+                }
+                finally
+                {
+                    copy.Dispose();
+                }
+
+                pending.SetResult(result);
+                System.Threading.Volatile.Write(ref pending.Done, 1);
+
+                if (!ReferenceEquals(System.Threading.Volatile.Read(ref _eden3dPending), pending))
+                {
+                    pending.DisposeResult();
+                }
+                else
+                {
+                    _context.QueueReady3DUpload(this);
+                }
+            });
+
+            return true;
+        }
+
+        private void TryApplyEden3DUpload()
+        {
+            Eden3DPendingUpload pending = System.Threading.Volatile.Read(ref _eden3dPending);
+
+            if (pending == null || System.Threading.Volatile.Read(ref pending.Done) == 0)
+            {
+                return;
+            }
+
+            if (!ReferenceEquals(System.Threading.Interlocked.CompareExchange(ref _eden3dPending, null, pending), pending))
+            {
+                return;
+            }
+
+            MemoryOwner<byte> result = pending.TryTakeResult();
+
+            if (result == null ||
+                pending.Generation != System.Threading.Volatile.Read(ref _eden3dGeneration) ||
+                !ReferenceEquals(pending.Target, HostTexture))
+            {
+                result?.Dispose();
+                pending.DisposeResult();
+                ResyncAfterEden3DUpload();
+                return;
+            }
+
+            // SetData can queue the upload on the threaded renderer. The queued command
+            // owns the buffer and disposes it after the backend has consumed its data.
+            HostTexture.SetData(result);
+
+            ResyncAfterEden3DUpload();
+        }
+
+        internal bool TryApplyReady3DUpload()
+        {
+            Eden3DPendingUpload pending = System.Threading.Volatile.Read(ref _eden3dPending);
+
+            if (pending == null || System.Threading.Volatile.Read(ref pending.Done) == 0)
+            {
+                return false;
+            }
+
+            TryApplyEden3DUpload();
+            return true;
+        }
+
+        private void ResyncAfterEden3DUpload()
+        {
+            if (_eden3dResyncNeeded && _eden3dPending == null)
+            {
+                _eden3dResyncNeeded = false;
+
+                SynchronizeFull();
+            }
+        }
+
+        private void InvalidateEden3DUpload()
+        {
+            Eden3DPendingUpload pending = System.Threading.Interlocked.Exchange(ref _eden3dPending, null);
+            if (pending != null)
+            {
+                System.Threading.Interlocked.Increment(ref _eden3dGeneration);
+                pending.DisposeResult();
             }
         }
     }

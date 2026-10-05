@@ -8,7 +8,22 @@ namespace Ryujinx.Graphics.GAL.Multithreading
 {
     public class ThreadedPipeline : IPipeline
     {
+        private const int MaxTrackedBlendStates = 8;
+        private const int MaxTrackedVertexAttributes = 32;
+
         private readonly ThreadedRenderer _renderer;
+        private readonly BlendDescriptor[] _lastBlendStates = new BlendDescriptor[MaxTrackedBlendStates];
+        private readonly bool[] _lastBlendStateValid = new bool[MaxTrackedBlendStates];
+        private readonly VertexAttribDescriptor[] _lastVertexAttribs = new VertexAttribDescriptor[MaxTrackedVertexAttributes];
+        private int _lastVertexAttribCount = -1;
+        private FrontFace _lastFrontFace;
+        private bool _lastFrontFaceValid;
+        private ulong _blendStateCalls;
+        private ulong _blendStateSkips;
+        private ulong _frontFaceCalls;
+        private ulong _frontFaceSkips;
+        private ulong _vertexAttribCalls;
+        private ulong _vertexAttribSkips;
 
         public ThreadedPipeline(ThreadedRenderer renderer)
         {
@@ -130,12 +145,27 @@ namespace Ryujinx.Graphics.GAL.Multithreading
 
         public unsafe void SetBlendState(AdvancedBlendDescriptor blend)
         {
+            // Advanced blending replaces the state for every target, so the
+            // per-target producer cache must be invalidated.
+            Array.Clear(_lastBlendStateValid);
             _renderer.New<SetBlendStateAdvancedCommand>()->Set(blend);
             _renderer.QueueCommand();
         }
 
         public unsafe void SetBlendState(int index, BlendDescriptor blend)
         {
+            ulong calls = ++_blendStateCalls;
+
+            if (_lastBlendStateValid[index] && BlendStateEquals(_lastBlendStates[index], blend))
+            {
+                _blendStateSkips++;
+                LogProducerDedup(calls, 0xfffff);
+                return;
+            }
+
+            _lastBlendStates[index] = blend;
+            _lastBlendStateValid[index] = true;
+            LogProducerDedup(calls, 0xfffff);
             _renderer.New<SetBlendStateCommand>()->Set(index, blend);
             _renderer.QueueCommand();
         }
@@ -172,6 +202,18 @@ namespace Ryujinx.Graphics.GAL.Multithreading
 
         public unsafe void SetFrontFace(FrontFace frontFace)
         {
+            ulong calls = ++_frontFaceCalls;
+
+            if (_lastFrontFaceValid && _lastFrontFace == frontFace)
+            {
+                _frontFaceSkips++;
+                LogProducerDedup(calls, 0x3ffff);
+                return;
+            }
+
+            _lastFrontFace = frontFace;
+            _lastFrontFaceValid = true;
+            LogProducerDedup(calls, 0x3ffff);
             _renderer.New<SetFrontFaceCommand>()->Set(frontFace);
             _renderer.QueueCommand();
         }
@@ -331,8 +373,46 @@ namespace Ryujinx.Graphics.GAL.Multithreading
 
         public unsafe void SetVertexAttribs(ReadOnlySpan<VertexAttribDescriptor> vertexAttribs)
         {
+            ulong calls = ++_vertexAttribCalls;
+            int count = Math.Min(MaxTrackedVertexAttributes, vertexAttribs.Length);
+            ReadOnlySpan<VertexAttribDescriptor> relevantAttribs = vertexAttribs[..count];
+
+            if (_lastVertexAttribCount == count && relevantAttribs.SequenceEqual(_lastVertexAttribs.AsSpan(0, count)))
+            {
+                _vertexAttribSkips++;
+                LogProducerDedup(calls, 0xfffff);
+                return;
+            }
+
+            relevantAttribs.CopyTo(_lastVertexAttribs);
+            _lastVertexAttribCount = count;
+            LogProducerDedup(calls, 0xfffff);
             _renderer.New<SetVertexAttribsCommand>()->Set(_renderer.CopySpan(vertexAttribs));
             _renderer.QueueCommand();
+        }
+
+        private static bool BlendStateEquals(BlendDescriptor left, BlendDescriptor right)
+        {
+            return left.Enable == right.Enable &&
+                   left.BlendConstant == right.BlendConstant &&
+                   left.ColorOp == right.ColorOp &&
+                   left.ColorSrcFactor == right.ColorSrcFactor &&
+                   left.ColorDstFactor == right.ColorDstFactor &&
+                   left.AlphaOp == right.AlphaOp &&
+                   left.AlphaSrcFactor == right.AlphaSrcFactor &&
+                   left.AlphaDstFactor == right.AlphaDstFactor;
+        }
+
+        private void LogProducerDedup(ulong calls, ulong mask)
+        {
+            if ((calls & mask) == 0)
+            {
+                Ryujinx.Common.Logging.Logger.Info?.Print(
+                    Ryujinx.Common.Logging.LogClass.Gpu,
+                    $"[NEOV2-GAL-PRODUCER-DEDUP1] blendCalls={_blendStateCalls} blendSkips={_blendStateSkips} " +
+                    $"frontCalls={_frontFaceCalls} frontSkips={_frontFaceSkips} " +
+                    $"attribCalls={_vertexAttribCalls} attribSkips={_vertexAttribSkips}");
+            }
         }
 
         public unsafe void SetVertexBuffers(ReadOnlySpan<VertexBufferDescriptor> vertexBuffers)

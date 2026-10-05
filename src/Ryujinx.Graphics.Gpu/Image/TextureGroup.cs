@@ -147,7 +147,27 @@ namespace Ryujinx.Graphics.Gpu.Image
             _allOffsets = size.AllOffsets;
             _sliceSizes = size.SliceSizes;
 
-            if (Storage.Target.HasDepthOrLayers() && Storage.Info.GetSlices() > GranularLayerThreshold)
+            bool eden3DSparse = false;
+
+            if (_is3D && GraphicsConfig.AsyncLarge3DTextureUpload)
+            {
+                MultiRange sparseRange = Storage.Range;
+
+                for (int i = 0; i < sparseRange.Count; i++)
+                {
+                    if (sparseRange.GetSubRange(i).Address == MemoryManager.PteUnmapped)
+                    {
+                        eden3DSparse = true;
+                        break;
+                    }
+                }
+            }
+
+            if (eden3DSparse)
+            {
+                (_hasLayerViews, _hasMipViews) = PropagateGranularity(hasLayerViews, hasMipViews);
+            }
+            else if (Storage.Target.HasDepthOrLayers() && Storage.Info.GetSlices() > GranularLayerThreshold)
             {
                 _hasLayerViews = true;
                 _hasMipViews = true;
@@ -318,6 +338,995 @@ namespace Ryujinx.Graphics.Gpu.Image
             return true;
         }
 
+        // Envio de texturas por faixas (sempre ligado).
+        // Texturas 2D grandes (tambem com camadas e/ou mipmaps) ganham um rastreio extra da memoria:
+        // - o nivel principal de cada camada e vigiado em pedacos pequenos (colunas de blocos do layout block-linear:
+        //   cada coluna de uma fileira de blocos fica continua na memoria);
+        // - os mipmaps menores de cada camada ficam num rastreio unico por camada.
+        // Quando o jogo grava so um pedaco da textura, apenas os pedacos/mipmaps alterados sao reenviados para a GPU, em
+        // vez da textura inteira. O rastreio normal da textura continua igual: isto so decide o que enviar no lugar do
+        // envio inteiro, e em qualquer caso duvidoso o envio inteiro de sempre e usado.
+        private RegionHandle[] _neoGranules; // [camada * _neoGranulesPerLayer + pedaco], nivel 0
+        private RegionHandle[] _neoTails; // [camada], niveis 1..n (null sem mipmaps)
+        private int[] _neoLayerOffset;
+        private int _neoLayers;
+        private int _neoBandsPerLayer;
+        private int _neoBandBytes;
+        private int _neoBandRows;
+        private int _neoBandGobBlocksInY;
+        private int _neoGobBlockBytes;
+        private int _neoGranuleBytes;
+        private int _neoGranulesPerLayer;
+        private bool _neoReprotectAll;
+        private long _neoTailBytes;
+        private string _neoBandsRejected;
+
+        private readonly List<(int Layer, int Offset, int Size)> _neoDirtyRanges = [];
+
+        // Pedacos que ficaram sujos (avisados pelo rastreio de memoria na thread que escreveu).
+        private readonly object _neoPendingLock = new();
+        private List<int> _neoPending = [];
+        private List<int> _neoWork = [];
+
+        // conferencia por hash. Cada pedaco enviado guarda uma "impressao digital" do que foi enviado;
+        // aos poucos (em rodizio, com limite de bytes por segundo) os pedacos marcados como sem mudanca sao conferidos.
+        // Se o conteudo mudou sem o rastreio avisar, o pedaco e reenviado na hora e contado no log.
+        private const int NeoVerifyMaxPerCall = 1024 * 1024;
+        private const long NeoVerifyBytesPerSecond = 16L * 1024 * 1024;
+        private const int NeoTailChunkBytes = 1024 * 1024;
+        private const ulong NeoBandMinTextureSize = 4UL * 1024 * 1024;
+        private Ryujinx.Common.Hash128[] _neoGranuleHash;
+        private bool[] _neoGranuleHashKnown;
+        private Ryujinx.Common.Hash128[] _neoTailHash; // [camada * _neoTailChunks + bloco]
+        private bool[] _neoTailHashKnown;
+        private int _neoTailChunks;
+        private int _neoVerifyCursor;
+        private long _neoVerifyCredit;
+        private long _neoVerifyLast;
+
+        private bool NeoFormatUploadsDirectly(Format format)
+        {
+            Capabilities caps = _context.Capabilities;
+
+            if (format.IsDepthOrStencil())
+            {
+                return false;
+            }
+
+            if (format.IsAstc())
+            {
+                return caps.SupportsAstcCompression;
+            }
+
+            if (format.IsEtc2())
+            {
+                return caps.SupportsEtc2Compression;
+            }
+
+            if (!TextureCompatibility.HostSupportsBcFormat(format, Target.Texture2D, caps))
+            {
+                return false;
+            }
+
+            return format != Format.R4G4Unorm && format != Format.R4G4B4A4Unorm && !format.Is16BitPacked();
+        }
+
+        private string NeoBandIneligibleReason()
+        {
+            TextureInfo info = Storage.Info;
+
+            if (_isBuffer || _is3D || (info.Target != Target.Texture2D && info.Target != Target.Texture2DArray))
+            {
+                return $"tipo {info.Target}";
+            }
+
+            if (info.IsLinear)
+            {
+                return "layout linear";
+            }
+
+            if (info.GobBlocksInTileX != 1 || info.GobBlocksInZ != 1)
+            {
+                return "layout de blocos incomum";
+            }
+
+            if (TextureRange.Count != 1)
+            {
+                return "memoria fragmentada";
+            }
+
+            if (Storage.ScaleFactor != 1f)
+            {
+                return "escala de resolucao";
+            }
+
+            if (Storage.HostTexture == null)
+            {
+                return "sem textura no host";
+            }
+
+            if (!NeoFormatUploadsDirectly(info.FormatInfo.Format))
+            {
+                return "formato precisa de conversao";
+            }
+
+            int bpp = info.FormatInfo.BytesPerPixel;
+
+            if (bpp != 1 && bpp != 2 && bpp != 4 && bpp != 8 && bpp != 16)
+            {
+                return "bytes por pixel incomum";
+            }
+
+            return null;
+        }
+
+        private string NeoTryCreateBands()
+        {
+            const int TargetGranularity = 64 * 1024;
+            const int MaxGranules = 64 * 1024;
+
+            TextureInfo info = Storage.Info;
+            FormatInfo format = info.FormatInfo;
+
+            int layers = info.GetSlices();
+            int levels = info.Levels;
+
+            if (layers != _layers || levels != _levels || _allOffsets.Length != layers * levels)
+            {
+                return "camadas/niveis inconsistentes";
+            }
+
+            int bpp = format.BytesPerPixel;
+            int wBlocks = Ryujinx.Common.BitUtils.DivRoundUp(info.Width, format.BlockWidth);
+            int hBlocks = Ryujinx.Common.BitUtils.DivRoundUp(info.Height, format.BlockHeight);
+
+            // Mesma reducao da altura do bloco que o LayoutConverter faz no nivel 0.
+            int gobBlocksInY = info.GobBlocksInY;
+
+            while (hBlocks <= (gobBlocksInY >> 1) * 8 && gobBlocksInY != 1)
+            {
+                gobBlocksInY >>= 1;
+            }
+
+            int bandRows = gobBlocksInY * 8;
+            int gobBlockBytes = 512 * gobBlocksInY;
+            int gobsWide = Ryujinx.Common.BitUtils.AlignUp(wBlocks * bpp, 64) / 64;
+            long bandBytes = (long)gobsWide * gobBlockBytes;
+            int bandsPerLayer = Ryujinx.Common.BitUtils.DivRoundUp(hBlocks, bandRows);
+
+            if (bandsPerLayer * (long)gobsWide < 16)
+            {
+                return "poucos pedacos";
+            }
+
+            // Granularidade: algumas colunas de blocos (ate ~16 KiB), sem atravessar o fim de uma fileira.
+            int columnsPerGranule = 1;
+
+            while (gobBlockBytes * columnsPerGranule < TargetGranularity && gobsWide % (columnsPerGranule * 2) == 0)
+            {
+                columnsPerGranule *= 2;
+            }
+
+            int granularity = gobBlockBytes * columnsPerGranule;
+
+            long level0Bytes = bandBytes * bandsPerLayer;
+            int granulesPerLayer = (int)(level0Bytes / granularity);
+
+            if ((long)granulesPerLayer * layers > MaxGranules)
+            {
+                return "pedacos demais";
+            }
+
+            long level0Size = levels > 1
+                ? _allOffsets[GetOffsetIndex(0, 1)] - _allOffsets[GetOffsetIndex(0, 0)]
+                : _sliceSizes[0];
+
+            if (level0Bytes > level0Size || level0Bytes > _sliceSizes[0] || level0Bytes > int.MaxValue)
+            {
+                return "tamanho da memoria nao bate com as faixas";
+            }
+
+            long tailBytes = 0;
+
+            if (levels > 1)
+            {
+                tailBytes = (long)_allOffsets[GetOffsetIndex(0, levels - 1)] + _sliceSizes[levels - 1] - _allOffsets[GetOffsetIndex(0, 1)];
+
+                if (tailBytes <= 0)
+                {
+                    return "mipmaps com tamanho invalido";
+                }
+            }
+
+            MemoryRange range = TextureRange.GetSubRange(0);
+
+            if (range.Address == MemoryManager.PteUnmapped)
+            {
+                return "memoria desmapeada";
+            }
+
+            ulong[] layerAddress = new ulong[layers];
+            int[] layerOffset = new int[layers];
+
+            for (int layer = 0; layer < layers; layer++)
+            {
+                long layerEnd = levels > 1
+                    ? (long)_allOffsets[GetOffsetIndex(layer, levels - 1)] + _sliceSizes[levels - 1]
+                    : (long)_allOffsets[GetOffsetIndex(layer, 0)] + level0Bytes;
+
+                if (layerEnd > (long)Storage.Size)
+                {
+                    return "tamanho da memoria nao bate com as camadas";
+                }
+
+                layerOffset[layer] = _allOffsets[GetOffsetIndex(layer, 0)];
+                layerAddress[layer] = range.Address + (ulong)layerOffset[layer];
+            }
+
+            RegionHandle[] granules = new RegionHandle[layers * granulesPerLayer];
+            RegionHandle[] tails = levels > 1 ? new RegionHandle[layers] : null;
+
+            for (int layer = 0; layer < layers; layer++)
+            {
+                for (int i = 0; i < granulesPerLayer; i++)
+                {
+                    int index = layer * granulesPerLayer + i;
+
+                    RegionHandle granule = _physicalMemory.BeginTracking(layerAddress[layer] + (ulong)((long)i * granularity), (ulong)granularity, ResourceKind.Texture);
+
+                    // Cada vez que o pedaco passa de limpo para sujo, anota qual foi (sem precisar varrer todos depois).
+                    granule.RegisterDirtyEvent(() => NeoOnGranuleDirty(index));
+
+                    granules[index] = granule;
+                }
+
+                if (tails != null)
+                {
+                    ulong tailAddress = range.Address + (ulong)_allOffsets[GetOffsetIndex(layer, 1)];
+
+                    tails[layer] = _physicalMemory.BeginTracking(tailAddress, (ulong)tailBytes, ResourceKind.Texture);
+                }
+            }
+
+            _neoGranules = granules;
+            _neoGranulesPerLayer = granulesPerLayer;
+            _neoGranuleBytes = granularity;
+            _neoReprotectAll = true; // Os pedacos nascem sujos sem aviso: a primeira carga protege todos.
+            _neoTails = tails;
+            _neoLayerOffset = layerOffset;
+            _neoLayers = layers;
+            _neoBandsPerLayer = bandsPerLayer;
+            _neoBandBytes = (int)bandBytes;
+            _neoBandRows = bandRows;
+            _neoBandGobBlocksInY = gobBlocksInY;
+            _neoGobBlockBytes = gobBlockBytes;
+            _neoTailBytes = tailBytes;
+
+            _neoGranuleHash = new Ryujinx.Common.Hash128[granules.Length];
+            _neoGranuleHashKnown = new bool[granules.Length];
+            _neoTailChunks = tails != null ? (int)((tailBytes + NeoTailChunkBytes - 1) / NeoTailChunkBytes) : 0;
+            _neoTailHash = tails != null ? new Ryujinx.Common.Hash128[layers * _neoTailChunks] : null;
+            _neoTailHashKnown = tails != null ? new bool[layers * _neoTailChunks] : null;
+            _neoVerifyCursor = 0;
+            _neoVerifyCredit = 0;
+            _neoVerifyLast = System.Diagnostics.Stopwatch.GetTimestamp();
+
+            return null;
+        }
+
+        private void NeoOnGranuleDirty(int index)
+        {
+            lock (_neoPendingLock)
+            {
+                _neoPending.Add(index);
+            }
+        }
+
+        /// <summary>
+        /// Pega a lista de pedacos avisados como sujos desde a ultima vez (a lista fica vazia para novos avisos).
+        /// </summary>
+        private List<int> NeoTakePending()
+        {
+            List<int> work = _neoWork;
+            work.Clear();
+
+            lock (_neoPendingLock)
+            {
+                _neoWork = _neoPending;
+                _neoPending = work;
+            }
+
+            return _neoWork;
+        }
+
+        private void NeoReprotectBands()
+        {
+            if (_neoGranules != null)
+            {
+                if (_neoReprotectAll)
+                {
+                    _neoReprotectAll = false;
+                    NeoTakePending();
+
+                    foreach (RegionHandle granule in _neoGranules)
+                    {
+                        if (granule.Dirty)
+                        {
+                            granule.Reprotect();
+                        }
+                    }
+                }
+                else
+                {
+                    foreach (int index in NeoTakePending())
+                    {
+                        RegionHandle granule = _neoGranules[index];
+
+                        if (granule.Dirty)
+                        {
+                            granule.Reprotect();
+                        }
+                    }
+                }
+            }
+
+            if (_neoTails != null)
+            {
+                foreach (RegionHandle tail in _neoTails)
+                {
+                    if (tail.Dirty)
+                    {
+                        tail.Reprotect();
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// true quando a sincronizacao atual cobre a textura inteira (todas as camadas e niveis).
+        /// </summary>
+        private bool NeoCoversWholeStorage(Texture texture, int baseHandle, int regionCount)
+        {
+            return baseHandle == 0 &&
+                   regionCount == _handles.Length &&
+                   texture.FirstLayer == 0 &&
+                   texture.FirstLevel == 0 &&
+                   texture.Info.GetSlices() == _layers &&
+                   texture.Info.Levels == _levels;
+        }
+
+        /// <summary>
+        /// antes de um envio inteiro "de sempre", marca como enviados SO os pedacos que esse envio
+        /// cobre (as camadas e niveis da textura/vista sincronizada). Pedacos de outras camadas ou niveis continuam
+        /// pendentes e sao enviados na proxima vez (mesma regra do Ryujinx por camada/nivel).
+        /// </summary>
+        private void NeoReprotectBandsForScope(Texture texture, int baseHandle, int regionCount)
+        {
+            if (_neoGranules == null)
+            {
+                return;
+            }
+
+            if (NeoCoversWholeStorage(texture, baseHandle, regionCount))
+            {
+                NeoReprotectBands();
+                return;
+            }
+
+            if (_neoReprotectAll)
+            {
+                // A primeira carga inteira ainda nao aconteceu: tudo continua pendente.
+                return;
+            }
+
+            int firstLayer = texture.FirstLayer;
+            int endLayer = firstLayer + texture.Info.GetSlices();
+            int firstLevel = texture.FirstLevel;
+            int endLevel = firstLevel + texture.Info.Levels;
+
+            bool coversLevel0 = firstLevel == 0;
+            bool coversTail = firstLevel <= 1 && endLevel >= _levels;
+
+            List<int> keep = null;
+
+            foreach (int index in NeoTakePending())
+            {
+                RegionHandle granule = _neoGranules[index];
+
+                if (!granule.Dirty)
+                {
+                    continue;
+                }
+
+                int layer = index / _neoGranulesPerLayer;
+
+                if (coversLevel0 && layer >= firstLayer && layer < endLayer)
+                {
+                    granule.Reprotect();
+                }
+                else
+                {
+                    (keep ??= []).Add(index);
+                }
+            }
+
+            if (keep != null)
+            {
+                lock (_neoPendingLock)
+                {
+                    _neoPending.AddRange(keep);
+                }
+            }
+
+            if (_neoTails != null && coversTail)
+            {
+                for (int layer = Math.Max(0, firstLayer); layer < Math.Min(endLayer, _neoLayers); layer++)
+                {
+                    if (_neoTails[layer].Dirty)
+                    {
+                        _neoTails[layer].Reprotect();
+                    }
+                }
+            }
+        }
+
+        private void NeoDisposeBands()
+        {
+            if (_neoGranules != null)
+            {
+                foreach (RegionHandle granule in _neoGranules)
+                {
+                    granule.Dispose();
+                }
+
+                _neoGranules = null;
+
+                lock (_neoPendingLock)
+                {
+                    _neoPending.Clear();
+                }
+            }
+
+            if (_neoTails != null)
+            {
+                foreach (RegionHandle tail in _neoTails)
+                {
+                    tail.Dispose();
+                }
+
+                _neoTails = null;
+            }
+
+            _neoBandsRejected = null;
+
+            _neoGranuleHash = null;
+            _neoGranuleHashKnown = null;
+            _neoTailHash = null;
+            _neoTailHashKnown = null;
+            _neoTailChunks = 0;
+        }
+
+        /// <summary>
+        /// envia para a GPU as colunas [firstColumn, endColumn) de uma fileira de blocos de uma camada.
+        /// </summary>
+        /// <returns>Bytes enviados</returns>
+        private int NeoUploadColumns(int layer, int band, int firstColumn, int endColumn, int wBlocks, int hBlocks)
+        {
+            TextureInfo info = Storage.Info;
+            FormatInfo format = info.FormatInfo;
+
+            int bpp = format.BytesPerPixel;
+            int columnBlocks = 64 / bpp;
+            int x0 = firstColumn * columnBlocks;
+            int firstRow = band * _neoBandRows;
+
+            int columns = endColumn - firstColumn;
+            int byteOffset = _neoLayerOffset[layer] + band * _neoBandBytes + firstColumn * _neoGobBlockBytes;
+            int byteSize = columns * _neoGobBlockBytes;
+
+            ReadOnlySpan<byte> guest = _physicalMemory.GetSpan(TextureRange.Slice((ulong)byteOffset, (ulong)byteSize));
+
+            // guarda a impressao digital exatamente do que esta sendo enviado.
+            NeoStoreGranuleHashes(layer, byteOffset - _neoLayerOffset[layer], byteSize, guest);
+
+            if (x0 >= wBlocks || firstRow >= hBlocks)
+            {
+                // So preenchimento de alinhamento, fora da imagem.
+                return 0;
+            }
+
+            int pieceBlocks = columns * columnBlocks;
+            int validBlocks = Math.Min(pieceBlocks, wBlocks - x0);
+            int validRows = Math.Min(_neoBandRows, hBlocks - firstRow);
+
+            MemoryOwner<byte> linear = LayoutConverter.ConvertBlockLinearToLinear(
+                pieceBlocks * format.BlockWidth,
+                _neoBandRows * format.BlockHeight,
+                1,
+                1,
+                1,
+                1,
+                format.BlockWidth,
+                format.BlockHeight,
+                bpp,
+                _neoBandGobBlocksInY,
+                1,
+                1,
+                new SizeInfo(byteSize),
+                guest);
+
+            int srcStride = pieceBlocks * bpp;
+            int dstStride = Ryujinx.Common.BitUtils.AlignUp(validBlocks * bpp, LayoutConverter.HostStrideAlignment);
+            int dataBytes = dstStride * validRows;
+
+            MemoryOwner<byte> data;
+
+            if (validBlocks == pieceBlocks)
+            {
+                if (dataBytes < linear.Length)
+                {
+                    data = MemoryOwner<byte>.RentCopy(linear.Span[..dataBytes]);
+                    linear.Dispose();
+                }
+                else
+                {
+                    data = linear;
+                }
+            }
+            else
+            {
+                // Ultima coluna passa da borda da imagem: reempacota as linhas com a largura valida.
+                data = MemoryOwner<byte>.Rent(dataBytes);
+
+                Span<byte> src = linear.Span;
+                Span<byte> dst = data.Span;
+                int rowBytes = validBlocks * bpp;
+
+                for (int row = 0; row < validRows; row++)
+                {
+                    src.Slice(row * srcStride, rowBytes).CopyTo(dst.Slice(row * dstStride, rowBytes));
+                }
+
+                linear.Dispose();
+            }
+
+            int x = x0 * format.BlockWidth;
+            int y = firstRow * format.BlockHeight;
+            int width = Math.Min(validBlocks * format.BlockWidth, info.Width - x);
+            int height = Math.Min(validRows * format.BlockHeight, info.Height - y);
+
+            Storage.HostTexture.SetData(data, layer, 0, new Rectangle<int>(x, y, width, height));
+
+            return dataBytes;
+        }
+
+        /// <summary>
+        /// guarda o hash dos pedacos inteiros contidos em [offsetInLayer, offsetInLayer + size) do nivel 0.
+        /// </summary>
+        private void NeoStoreGranuleHashes(int layer, int offsetInLayer, int size, ReadOnlySpan<byte> guest)
+        {
+            if (_neoGranuleHash == null || offsetInLayer % _neoGranuleBytes != 0 || size % _neoGranuleBytes != 0)
+            {
+                return;
+            }
+
+            int first = layer * _neoGranulesPerLayer + offsetInLayer / _neoGranuleBytes;
+            int count = size / _neoGranuleBytes;
+
+            for (int i = 0; i < count; i++)
+            {
+                _neoGranuleHash[first + i] = Ryujinx.Common.XXHash128.ComputeHash(guest.Slice(i * _neoGranuleBytes, _neoGranuleBytes));
+                _neoGranuleHashKnown[first + i] = true;
+            }
+        }
+
+        private Ryujinx.Common.Hash128 NeoHashGuest(int offset, int size)
+        {
+            return Ryujinx.Common.XXHash128.ComputeHash(_physicalMemory.GetSpan(TextureRange.Slice((ulong)offset, (ulong)size)));
+        }
+
+        private (int Offset, int Size) NeoTailChunk(int layer, int chunk)
+        {
+            long start = (long)chunk * NeoTailChunkBytes;
+            int size = (int)Math.Min(NeoTailChunkBytes, _neoTailBytes - start);
+
+            return (_allOffsets[GetOffsetIndex(layer, 1)] + (int)start, size);
+        }
+
+        /// <summary>
+        /// marca a conferencia dos mipmaps de uma camada como "sem base" (a base e gravada na proxima conferencia).
+        /// </summary>
+        private void NeoForgetTailHashes(int layer)
+        {
+            if (_neoTailHashKnown == null)
+            {
+                return;
+            }
+
+            for (int chunk = 0; chunk < _neoTailChunks; chunk++)
+            {
+                _neoTailHashKnown[layer * _neoTailChunks + chunk] = false;
+            }
+        }
+
+        /// <summary>
+        /// envia os mipmaps (niveis 1..n) de uma camada.
+        /// </summary>
+        /// <returns>Bytes enviados</returns>
+        private long NeoUploadTail(int layer)
+        {
+            long bytes = 0;
+
+            for (int level = 1; level < _levels; level++)
+            {
+                int offset = _allOffsets[GetOffsetIndex(layer, level)];
+                int size = _sliceSizes[level];
+
+                ReadOnlySpan<byte> guest = _physicalMemory.GetSpan(TextureRange.Slice((ulong)offset, (ulong)size));
+
+                MemoryOwner<byte> result = Storage.ConvertToHostCompatibleFormat(guest, level, true);
+
+                bytes += result.Length;
+
+                Storage.HostTexture.SetData(result, layer, level);
+            }
+
+            NeoForgetTailHashes(layer);
+
+            return bytes;
+        }
+
+        /// <summary>
+        /// depois de um envio inteiro "de sempre", grava a impressao digital do nivel principal das
+        /// camadas enviadas (os mipmaps ganham a base aos poucos, na conferencia).
+        /// </summary>
+        private void NeoRehashAfterFull(Texture texture, int baseHandle, int regionCount)
+        {
+            if (_neoGranuleHash == null || _neoReprotectAll)
+            {
+                return;
+            }
+
+            int firstLayer;
+            int endLayer;
+            bool coversLevel0;
+            bool coversTail;
+
+            if (NeoCoversWholeStorage(texture, baseHandle, regionCount))
+            {
+                firstLayer = 0;
+                endLayer = _neoLayers;
+                coversLevel0 = true;
+                coversTail = true;
+            }
+            else
+            {
+                firstLayer = Math.Max(0, texture.FirstLayer);
+                endLayer = Math.Min(_neoLayers, texture.FirstLayer + texture.Info.GetSlices());
+                coversLevel0 = texture.FirstLevel == 0;
+                coversTail = texture.FirstLevel <= 1 && texture.FirstLevel + texture.Info.Levels >= _levels;
+            }
+
+            for (int layer = firstLayer; layer < endLayer; layer++)
+            {
+                if (coversLevel0)
+                {
+                    int level0Bytes = _neoGranulesPerLayer * _neoGranuleBytes;
+
+                    ReadOnlySpan<byte> guest = _physicalMemory.GetSpan(TextureRange.Slice((ulong)_neoLayerOffset[layer], (ulong)level0Bytes));
+
+                    NeoStoreGranuleHashes(layer, 0, level0Bytes, guest);
+                }
+
+                if (coversTail)
+                {
+                    NeoForgetTailHashes(layer);
+                }
+            }
+        }
+
+        /// <summary>
+        /// confere, em rodizio, alguns pedacos marcados como sem mudanca. Se o conteudo mudou sem o
+        /// rastreio avisar, reenvia o pedaco (ou os mipmaps da camada) e conta no log.
+        /// </summary>
+        private void NeoVerifySome()
+        {
+            if (_neoGranuleHash == null || _neoReprotectAll)
+            {
+                return;
+            }
+
+            foreach (TextureGroupHandle handle in _handles)
+            {
+                if (handle.Modified)
+                {
+                    // A GPU escreveu nesta textura: a memoria do jogo pode estar atrasada em relacao a ela.
+                    return;
+                }
+            }
+
+            long start = System.Diagnostics.Stopwatch.GetTimestamp();
+            long elapsed = Math.Min(start - _neoVerifyLast, System.Diagnostics.Stopwatch.Frequency);
+            _neoVerifyLast = start;
+            _neoVerifyCredit = Math.Min(NeoVerifyMaxPerCall, _neoVerifyCredit + elapsed * NeoVerifyBytesPerSecond / System.Diagnostics.Stopwatch.Frequency);
+
+            if (_neoVerifyCredit < _neoGranuleBytes)
+            {
+                return;
+            }
+
+            int granuleCount = _neoGranules.Length;
+            int units = granuleCount + (_neoTailHash != null ? _neoTailHash.Length : 0);
+
+            TextureInfo info = Storage.Info;
+            FormatInfo format = info.FormatInfo;
+            int wBlocks = Ryujinx.Common.BitUtils.DivRoundUp(info.Width, format.BlockWidth);
+            int hBlocks = Ryujinx.Common.BitUtils.DivRoundUp(info.Height, format.BlockHeight);
+
+            int visited = 0;
+
+            while (_neoVerifyCredit > 0 && visited < units)
+            {
+                int unit = _neoVerifyCursor;
+                _neoVerifyCursor = unit + 1 >= units ? 0 : unit + 1;
+                visited++;
+
+                if (unit < granuleCount)
+                {
+                    RegionHandle granule = _neoGranules[unit];
+
+                    if (granule.Dirty)
+                    {
+                        // Escrita avisada: o envio normal cuida.
+                        continue;
+                    }
+
+                    int layer = unit / _neoGranulesPerLayer;
+                    int offsetInLayer = (unit % _neoGranulesPerLayer) * _neoGranuleBytes;
+
+                    Ryujinx.Common.Hash128 hash = NeoHashGuest(_neoLayerOffset[layer] + offsetInLayer, _neoGranuleBytes);
+                    _neoVerifyCredit -= _neoGranuleBytes;
+
+                    if (!_neoGranuleHashKnown[unit])
+                    {
+                        _neoGranuleHash[unit] = hash;
+                        _neoGranuleHashKnown[unit] = true;
+                        continue;
+                    }
+
+                    if (hash == _neoGranuleHash[unit] || granule.Dirty)
+                    {
+                        continue;
+                    }
+
+                    // Mudou sem aviso do rastreio.
+                    int band = offsetInLayer / _neoBandBytes;
+                    int firstColumn = (offsetInLayer - band * _neoBandBytes) / _neoGobBlockBytes;
+                    int endColumn = firstColumn + _neoGranuleBytes / _neoGobBlockBytes;
+
+                    NeoUploadColumns(layer, band, firstColumn, endColumn, wBlocks, hBlocks);
+                }
+                else
+                {
+                    int tailUnit = unit - granuleCount;
+                    int layer = tailUnit / _neoTailChunks;
+                    int chunk = tailUnit % _neoTailChunks;
+
+                    if (_neoTails[layer].Dirty)
+                    {
+                        continue;
+                    }
+
+                    (int offset, int size) = NeoTailChunk(layer, chunk);
+
+                    Ryujinx.Common.Hash128 hash = NeoHashGuest(offset, size);
+                    _neoVerifyCredit -= size;
+
+                    if (!_neoTailHashKnown[tailUnit])
+                    {
+                        _neoTailHash[tailUnit] = hash;
+                        _neoTailHashKnown[tailUnit] = true;
+                        continue;
+                    }
+
+                    if (hash == _neoTailHash[tailUnit] || _neoTails[layer].Dirty)
+                    {
+                        continue;
+                    }
+
+                    NeoUploadTail(layer);
+                }
+            }
+        }
+
+        /// <summary>
+        /// tenta substituir o envio inteiro da textura pelo envio so dos pedacos/mipmaps alterados.
+        /// Devolve false (com o motivo) para seguir o envio inteiro de sempre.
+        /// </summary>
+        private bool NeoTrySynchronizeBands(Texture texture, int baseHandle, int regionCount, out string reason)
+        {
+            if (Storage.Size < NeoBandMinTextureSize)
+            {
+                reason = "textura pequena";
+                return false;
+            }
+
+            if (!NeoCoversWholeStorage(texture, baseHandle, regionCount))
+            {
+                // So quando o envio inteiro cobriria a textura toda (e nao so uma vista de parte dela).
+                reason = "vista parcial da textura";
+                return false;
+            }
+
+            reason = NeoBandIneligibleReason();
+
+            if (reason != null)
+            {
+                return false;
+            }
+
+            if (_neoGranules == null)
+            {
+                if (_neoBandsRejected != null)
+                {
+                    reason = _neoBandsRejected;
+                    return false;
+                }
+
+                reason = NeoTryCreateBands();
+
+                if (reason != null)
+                {
+                    _neoBandsRejected = reason;
+                    return false;
+                }
+
+                // O rastreio novo nasce todo marcado como alterado: a primeira carga e inteira.
+                reason = "primeira carga (faixas criadas)";
+                return false;
+            }
+
+            // Pega os pedacos alterados do nivel principal (e ja protege de novo antes de ler a memoria:
+            // uma escrita durante o envio marca o pedaco outra vez).
+            _neoDirtyRanges.Clear();
+
+            if (_neoReprotectAll)
+            {
+                // Ainda nao houve a primeira carga inteira depois de criar os pedacos.
+                reason = "primeira carga (faixas criadas)";
+                return false;
+            }
+
+            long dirtyBytes = 0;
+
+            List<int> pending = NeoTakePending();
+            pending.Sort();
+
+            int previous = -1;
+
+            foreach (int index in pending)
+            {
+                if (index == previous)
+                {
+                    continue;
+                }
+
+                previous = index;
+
+                RegionHandle granule = _neoGranules[index];
+
+                if (!granule.Dirty)
+                {
+                    continue;
+                }
+
+                granule.Reprotect();
+
+                int layer = index / _neoGranulesPerLayer;
+                int offset = (index % _neoGranulesPerLayer) * _neoGranuleBytes;
+
+                int last = _neoDirtyRanges.Count - 1;
+
+                if (last >= 0 && _neoDirtyRanges[last].Layer == layer && _neoDirtyRanges[last].Offset + _neoDirtyRanges[last].Size == offset)
+                {
+                    _neoDirtyRanges[last] = (layer, _neoDirtyRanges[last].Offset, _neoDirtyRanges[last].Size + _neoGranuleBytes);
+                }
+                else
+                {
+                    _neoDirtyRanges.Add((layer, offset, _neoGranuleBytes));
+                }
+
+                dirtyBytes += _neoGranuleBytes;
+            }
+
+            int dirtyTails = 0;
+
+            if (_neoTails != null)
+            {
+                foreach (RegionHandle tail in _neoTails)
+                {
+                    if (tail.Dirty)
+                    {
+                        dirtyTails++;
+                        dirtyBytes += _neoTailBytes;
+                    }
+                }
+            }
+
+            if (dirtyBytes == 0)
+            {
+                // O rastreio geral da textura ficou marcado por uma escrita que o rastreio fino ja tinha pegado e
+                // enviado (escrita durante o envio anterior). Nao ha nada novo para enviar.
+                NeoVerifySome();
+                reason = null;
+                return true;
+            }
+
+            long trackedBytes = (long)_neoLayers * _neoBandsPerLayer * _neoBandBytes + (_neoTails != null ? _neoTails.Length * _neoTailBytes : 0);
+
+            if (dirtyBytes * 4 >= trackedBytes * 3)
+            {
+                reason = "quase tudo alterado";
+                return false;
+            }
+
+            TextureInfo info = Storage.Info;
+            FormatInfo format = info.FormatInfo;
+
+            int wBlocks = Ryujinx.Common.BitUtils.DivRoundUp(info.Width, format.BlockWidth);
+            int hBlocks = Ryujinx.Common.BitUtils.DivRoundUp(info.Height, format.BlockHeight);
+
+            int uploads = 0;
+            long uploadedBytes = 0;
+
+            foreach ((int layer, int rangeOffset, int rangeSize) in _neoDirtyRanges)
+            {
+                int offset = rangeOffset;
+                int end = rangeOffset + rangeSize;
+
+                while (offset < end)
+                {
+                    int band = offset / _neoBandBytes;
+                    int bandStart = band * _neoBandBytes;
+                    int pieceEnd = Math.Min(end, bandStart + _neoBandBytes);
+
+                    int firstColumn = (offset - bandStart) / _neoGobBlockBytes;
+                    int endColumn = Ryujinx.Common.BitUtils.DivRoundUp(pieceEnd - bandStart, _neoGobBlockBytes);
+
+                    int bytes = NeoUploadColumns(layer, band, firstColumn, endColumn, wBlocks, hBlocks);
+
+                    if (bytes != 0)
+                    {
+                        uploads++;
+                        uploadedBytes += bytes;
+                    }
+
+                    offset = pieceEnd;
+                }
+            }
+
+            _neoDirtyRanges.Clear();
+
+            if (_neoTails != null && dirtyTails != 0)
+            {
+                for (int layer = 0; layer < _neoLayers; layer++)
+                {
+                    if (!_neoTails[layer].Dirty)
+                    {
+                        continue;
+                    }
+
+                    _neoTails[layer].Reprotect();
+
+                    uploadedBytes += NeoUploadTail(layer);
+                }
+            }
+
+            NeoVerifySome();
+
+            return true;
+        }
+
         /// <summary>
         /// Synchronize memory for a given texture.
         /// If overlapping tracking handles are dirty, fully or partially synchronize the texture data.
@@ -399,8 +1408,16 @@ namespace Ryujinx.Graphics.Gpu.Image
                     else
                     {
                         // Full texture invalidation.
+                        // Texturas grandes elegiveis enviam so as faixas alteradas.
+                        if (!NeoTrySynchronizeBands(texture, baseHandle, regionCount, out string bandsSkipReason))
+                        {
+                            // So marca como enviados os pedacos que este envio inteiro cobre.
+                            NeoReprotectBandsForScope(texture, baseHandle, regionCount);
 
-                        texture.SynchronizeFull();
+                            texture.SynchronizeFull();
+
+                            NeoRehashAfterFull(texture, baseHandle, regionCount);
+                        }
                     }
                 }
 
@@ -1431,8 +2448,12 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// </summary>
         public void RangeChanged()
         {
-            _hasLayerViews = true;
-            _hasMipViews = true;
+            NeoDisposeBands();
+
+            bool eden3D = _is3D && GraphicsConfig.AsyncLarge3DTextureUpload;
+
+            _hasLayerViews = !eden3D;
+            _hasMipViews = !eden3D;
 
             RecalculateHandleRegions(true);
 
@@ -1803,6 +2824,8 @@ namespace Ryujinx.Graphics.Gpu.Image
             {
                 group.Dispose();
             }
+
+            NeoDisposeBands();
 
             foreach (TextureIncompatibleOverlap incompatible in _incompatibleOverlaps)
             {

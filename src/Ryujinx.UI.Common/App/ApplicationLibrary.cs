@@ -279,7 +279,7 @@ namespace Ryujinx.UI.App.Common
                         }
                     }
 
-                    applicationData.Icon ??= extension == ".xci" ? _xciIcon : _nspIcon;
+                    applicationData.Icon ??= (extension is ".xci" or ".xcz") ? _xciIcon : _nspIcon;
                 }
 
                 applicationData.ControlHolder = controlHolder;
@@ -317,10 +317,12 @@ namespace Ryujinx.UI.App.Common
                 switch (extension)
                 {
                     case ".xci":
+                    case ".xcz":
                         {
                             Xci xci = new(_virtualFileSystem.KeySet, file.AsStorage());
-
-                            applications = GetApplicationsFromPfs(xci.OpenPartition(XciPartitionType.Secure), applicationPath);
+                            IFileSystem pfs = xci.OpenPartition(XciPartitionType.Secure);
+                            pfs = NczSupport.WrapIfCompressed(pfs);
+                            applications = GetApplicationsFromPfs(pfs, applicationPath);
 
                             if (applications.Count == 0)
                             {
@@ -330,10 +332,16 @@ namespace Ryujinx.UI.App.Common
                             break;
                         }
                     case ".nsp":
+                    case ".nsz":
                     case ".pfs0":
                         {
                             PartitionFileSystem pfs = new();
                             pfs.Initialize(file.AsStorage()).ThrowIfFailure();
+
+                            if (NczSupport.TryWrap(pfs, out PartitionFileSystem nczPfs))
+                            {
+                                pfs = nczPfs;
+                            }
 
                             ApplicationData result = GetApplicationFromNsp(pfs, applicationPath);
 
@@ -694,9 +702,9 @@ namespace Ryujinx.UI.App.Common
                         IEnumerable<string> files = Directory.EnumerateFiles(appDir, "*", options).Where(file =>
                         {
                             return
-                                (Path.GetExtension(file).ToLower() is ".nsp" && ConfigurationState.Instance.UI.ShownFileTypes.NSP.Value) ||
+                                ((Path.GetExtension(file).ToLower() is ".nsp" or ".nsz") && ConfigurationState.Instance.UI.ShownFileTypes.NSP.Value) ||
                                 (Path.GetExtension(file).ToLower() is ".pfs0" && ConfigurationState.Instance.UI.ShownFileTypes.PFS0.Value) ||
-                                (Path.GetExtension(file).ToLower() is ".xci" && ConfigurationState.Instance.UI.ShownFileTypes.XCI.Value) ||
+                                ((Path.GetExtension(file).ToLower() is ".xci" or ".xcz") && ConfigurationState.Instance.UI.ShownFileTypes.XCI.Value) ||
                                 (Path.GetExtension(file).ToLower() is ".nca" && ConfigurationState.Instance.UI.ShownFileTypes.NCA.Value) ||
                                 (Path.GetExtension(file).ToLower() is ".nro" && ConfigurationState.Instance.UI.ShownFileTypes.NRO.Value) ||
                                 (Path.GetExtension(file).ToLower() is ".nso" && ConfigurationState.Instance.UI.ShownFileTypes.NSO.Value);
@@ -1173,8 +1181,10 @@ namespace Ryujinx.UI.App.Common
                 return Path.GetExtension(applicationPath)?.ToLower() switch
                 {
                     ".nsp" => _nspIcon,
+                    ".nsz" => _nspIcon,
                     ".pfs0" => _nspIcon,
                     ".xci" => _xciIcon,
+                    ".xcz" => _xciIcon,
                     ".nso" => _nsoIcon,
                     ".nro" => _nroIcon,
                     ".nca" => _ncaIcon,
@@ -1191,7 +1201,7 @@ namespace Ryujinx.UI.App.Common
 
                     using FileStream file = new(applicationPath ?? string.Empty, FileMode.Open, FileAccess.Read);
 
-                    if (extension is ".nsp" or ".pfs0" or ".xci")
+                    if (extension is ".nsp" or ".nsz" or ".pfs0" or ".xci" or ".xcz")
                     {
                         try
                         {
@@ -1199,7 +1209,7 @@ namespace Ryujinx.UI.App.Common
 
                             bool isExeFs = false;
 
-                            if (extension == ".xci")
+                            if (extension is ".xci" or ".xcz")
                             {
                                 Xci xci = new(_virtualFileSystem.KeySet, file.AsStorage());
 
@@ -1219,6 +1229,8 @@ namespace Ryujinx.UI.App.Common
                                     }
                                 }
                             }
+
+                            pfs = NczSupport.WrapIfCompressed(pfs);
 
                             if (isExeFs)
                             {
@@ -1270,17 +1282,17 @@ namespace Ryujinx.UI.App.Common
                                         break;
                                     }
 
-                                    applicationIcon ??= extension == ".xci" ? _xciIcon : _nspIcon;
+                                    applicationIcon ??= (extension is ".xci" or ".xcz") ? _xciIcon : _nspIcon;
                                 }
                             }
                         }
                         catch (MissingKeyException)
                         {
-                            applicationIcon = extension == ".xci" ? _xciIcon : _nspIcon;
+                            applicationIcon = (extension is ".xci" or ".xcz") ? _xciIcon : _nspIcon;
                         }
                         catch (InvalidDataException)
                         {
-                            applicationIcon = extension == ".xci" ? _xciIcon : _nspIcon;
+                            applicationIcon = (extension is ".xci" or ".xcz") ? _xciIcon : _nspIcon;
                         }
                         catch (Exception exception)
                         {

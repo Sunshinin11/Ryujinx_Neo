@@ -16,9 +16,18 @@ namespace Ryujinx.Graphics.Nvdec
     {
         private static readonly Decoder _decoder = new();
 
-        public unsafe static void Decode(ResourceManager rm, ref NvdecRegisters state)
+        public unsafe static void Decode(NvdecDecoderContext context, ResourceManager rm, ref NvdecRegisters state)
         {
             PictureInfo pictureInfo = rm.MemoryManager.DeviceRead<PictureInfo>(state.SetDrvPicSetupOffset);
+
+            // NEOV2-VP9EDEN1: com a chave ligada, tenta o FFmpeg (esquema do Eden); se nao der, segue em C#.
+            if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.Vp9FFmpegEnabled &&
+                context != null &&
+                context.Vp9FFmpegDecoder.TryDecode(rm, ref state, in pictureInfo))
+            {
+                return;
+            }
+
             EntropyProbs entropy = rm.MemoryManager.DeviceRead<EntropyProbs>(state.Vp9SetProbTabBufOffset);
 
             ISurface Rent(uint lumaOffset, uint chromaOffset, FrameSize size)

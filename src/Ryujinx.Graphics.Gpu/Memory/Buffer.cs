@@ -30,6 +30,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <summary>
         /// Start address of the buffer in guest memory.
         /// </summary>
+        public PhysicalMemory PhysicalMemory => _physicalMemory;
         public ulong Address { get; }
 
         /// <summary>
@@ -49,6 +50,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// Increments when the buffer is (partially) unmapped or disposed.
         /// </summary>
         public int UnmappedSequence { get; private set; }
+
+        /// <summary>
+        /// NEOV2-GPUMEM1: last buffer cache frame where this buffer was used (Eden-style LRU collection).
+        /// </summary>
+        public ulong LastUseFrame;
 
         /// <summary>
         /// Indicates if the buffer can be used in a sparse buffer mapping.
@@ -760,6 +766,13 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="size">Size in bytes</param>
         public void ExternalFlush(ulong address, ulong size)
         {
+            ExternalFlush(address, size, forceSync: false);
+        }
+
+        // Keep the tracking callback's exact two-argument signature. Only the
+        // collector opts into forced synchronization through this overload.
+        private void ExternalFlush(ulong address, ulong size, bool forceSync)
+        {
             _context.Renderer.BackgroundContextAction(() =>
             {
                 BufferModifiedRangeList ranges = _modifiedRanges;
@@ -767,7 +780,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 if (ranges != null)
                 {
                     (address, size) = PageAlign(address, size);
-                    ranges.WaitForAndFlushRanges(address, size);
+                    ranges.WaitForAndFlushRanges(address, size, forceSync);
                 }
             }, true);
         }
@@ -1037,8 +1050,59 @@ namespace Ryujinx.Graphics.Gpu.Memory
         }
 
         /// <summary>
+        /// NEOV2-GPUMEM1: true when the buffer can be deleted without losing data or breaking dependencies:
+        /// no pending sync action, no virtual or sparse users,
+        /// and no other references (migrations).
+        /// </summary>
+        internal bool CanBeginEviction
+        {
+            get
+            {
+                if (_referenceCount != 1 || _syncActionRegistered || _bufferInherited || SparseCompatible)
+                {
+                    return false;
+                }
+
+                _virtualDependenciesLock.EnterReadLock();
+
+                try
+                {
+                    return _virtualDependencies == null || _virtualDependencies.Count == 0;
+                }
+                finally
+                {
+                    _virtualDependenciesLock.ExitReadLock();
+                }
+            }
+        }
+
+        internal bool CanBeEvicted => CanBeginEviction && !HasModifiedData;
+        internal bool HasModifiedData => _modifiedRanges != null && _modifiedRanges.HasRanges;
+
+        // Called only by the GPU-thread collector. Pending sync actions, migrations,
+        // sparse buffers and virtual dependencies are excluded before any readback.
+        // Use the existing background-context flush and force fence synchronization
+        // even if the separate relaxed readback setting is enabled. Current-sync
+        // modifications remain protected and prevent deletion.
+        internal bool TryPrepareForEviction()
+        {
+            if (!CanBeginEviction)
+            {
+                return false;
+            }
+
+            if (HasModifiedData)
+            {
+                ExternalFlush(Address, Size, forceSync: true);
+            }
+
+            return CanBeEvicted;
+        }
+
+        /// <summary>
         /// Disposes the host buffer's data, not its tracking handles.
         /// </summary>
+
         public void DisposeData()
         {
             _modifiedRanges?.Clear();

@@ -63,6 +63,33 @@ namespace Ryujinx.Memory
         }
 
         /// <summary>
+        /// NEOV2 NCE-LOWBASE1: wraps a range already reserved at a known address.
+        /// </summary>
+        private MemoryBlock(nint pointer, ulong size, bool viewCompatible)
+        {
+            _pointer = pointer;
+            _viewCompatible = viewCompatible;
+            Size = size;
+        }
+
+        /// <summary>
+        /// NEOV2 NCE-LOWBASE1: tries to reserve a view compatible block at exactly the given address.
+        /// Existing mappings are never replaced; if the range is not free, no block is created.
+        /// </summary>
+        /// <param name="address">Desired start address</param>
+        /// <param name="size">Size of the block in bytes</param>
+        /// <param name="block">The reserved block, or null on failure</param>
+        /// <returns>True if the block was reserved at the given address, false otherwise</returns>
+        public static bool TryReserveAt(ulong address, ulong size, out MemoryBlock block)
+        {
+            nint ptr = MemoryManagement.ReserveAt((nint)address, size);
+
+            block = ptr != nint.Zero ? new MemoryBlock(ptr, size, viewCompatible: true) : null;
+
+            return block != null;
+        }
+
+        /// <summary>
         /// Creates a new instance of the memory block class, with a existing backing storage.
         /// </summary>
         /// <param name="size">Size of the memory block in bytes</param>

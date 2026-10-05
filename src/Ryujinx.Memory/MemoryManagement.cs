@@ -39,6 +39,20 @@ namespace Ryujinx.Memory
             }
         }
 
+        /// <summary>
+        /// NEOV2 NCE-LOWBASE1: reserves a range at exactly the given address, if that range is free.
+        /// Only supported on Unix-like hosts, returns zero elsewhere.
+        /// </summary>
+        public static nint ReserveAt(nint address, ulong size)
+        {
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || PlatformInfo.IsBionic)
+            {
+                return MemoryManagementUnix.ReserveAt(address, size);
+            }
+
+            return nint.Zero;
+        }
+
         public static void Commit(nint address, ulong size, bool forJit)
         {
             if (OperatingSystem.IsWindows())

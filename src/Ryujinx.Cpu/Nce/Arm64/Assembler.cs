@@ -17,9 +17,8 @@ namespace Ryujinx.Cpu.Nce.Arm64
 
         private class LabelState
         {
-            public int BranchIndex;
+            public readonly List<int> BranchIndices = new();
             public int TargetIndex;
-            public bool HasBranch;
             public bool HasTarget;
         }
 
@@ -48,20 +47,22 @@ namespace Ryujinx.Cpu.Nce.Arm64
             state.TargetIndex = targetIndex;
             state.HasTarget = true;
 
-            if (state.HasBranch)
+            foreach (int branchIndex in state.BranchIndices)
             {
-                int imm = (targetIndex - state.BranchIndex) * sizeof(uint);
-                uint code = _code[state.BranchIndex];
+                int imm = (targetIndex - branchIndex) * sizeof(uint);
+                uint code = _code[branchIndex];
 
                 if ((code & 0xfc000000u) == 0x14000000u)
                 {
-                    _code[state.BranchIndex] = code | EncodeSImm26_2(imm);
+                    _code[branchIndex] = code | EncodeSImm26_2(imm);
                 }
                 else
                 {
-                    _code[state.BranchIndex] = code | (EncodeSImm19_2(imm) << 5);
+                    _code[branchIndex] = code | (EncodeSImm19_2(imm) << 5);
                 }
             }
+
+            state.BranchIndices.Clear();
         }
 
         public void B(Operand label, ArmCondition condition = ArmCondition.Al)
@@ -70,14 +71,15 @@ namespace Ryujinx.Cpu.Nce.Arm64
 
             LabelState state = _labels[label.AsInt32()];
 
-            state.BranchIndex = branchIndex;
-            state.HasBranch = true;
-
             int imm = 0;
 
             if (state.HasTarget)
             {
                 imm = (state.TargetIndex - branchIndex) * sizeof(uint);
+            }
+            else
+            {
+                state.BranchIndices.Add(branchIndex);
             }
 
             if (condition == ArmCondition.Al)
@@ -96,14 +98,15 @@ namespace Ryujinx.Cpu.Nce.Arm64
 
             LabelState state = _labels[label.AsInt32()];
 
-            state.BranchIndex = branchIndex;
-            state.HasBranch = true;
-
             int imm = 0;
 
             if (state.HasTarget)
             {
                 imm = (state.TargetIndex - branchIndex) * sizeof(uint);
+            }
+            else
+            {
+                state.BranchIndices.Add(branchIndex);
             }
 
             Cbz(rt, imm);
@@ -115,14 +118,15 @@ namespace Ryujinx.Cpu.Nce.Arm64
 
             LabelState state = _labels[label.AsInt32()];
 
-            state.BranchIndex = branchIndex;
-            state.HasBranch = true;
-
             int imm = 0;
 
             if (state.HasTarget)
             {
                 imm = (state.TargetIndex - branchIndex) * sizeof(uint);
+            }
+            else
+            {
+                state.BranchIndices.Add(branchIndex);
             }
 
             Cbnz(rt, imm);
@@ -586,6 +590,12 @@ namespace Ryujinx.Cpu.Nce.Arm64
 
         public void Stlxr(Operand rt, Operand rn, Operand rs)
         {
+            int status = rs.GetRegister().Index;
+            if (status == rt.GetRegister().Index || (status == rn.GetRegister().Index && status != SpRegister))
+            {
+                throw new ArgumentException("STLXR status must differ from its value and non-SP base registers.");
+            }
+
             WriteInstructionRm16(0x0800fc00u | ((rt.Type == OperandType.I64 ? 3u : 2u) << 30), rt, rn, rs);
         }
 

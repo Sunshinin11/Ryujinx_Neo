@@ -809,6 +809,7 @@ namespace Ryujinx.Ava
                 switch (Path.GetExtension(ApplicationPath).ToLowerInvariant())
                 {
                     case ".xci":
+                    case ".xcz":
                         {
                             Logger.Info?.Print(LogClass.Application, "Loading as XCI.");
 
@@ -837,6 +838,7 @@ namespace Ryujinx.Ava
                             break;
                         }
                     case ".nsp":
+                    case ".nsz":
                     case ".pfs0":
                         {
                             Logger.Info?.Print(LogClass.Application, "Loading as NSP.");

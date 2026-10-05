@@ -1,3 +1,4 @@
+using Ryujinx.Common.Diagnostics;
 using Ryujinx.Common.Logging;
 using System;
 using System.Diagnostics;
@@ -27,12 +28,16 @@ namespace Ryujinx.Graphics.Vulkan
 
         public static void RecordSubmit(long ticks)
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             _submitCalls++;
             _submitTicks += ticks;
         }
 
         public static void TryFlush()
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             long now = Stopwatch.GetTimestamp();
             if (now - _lastLogTimestamp >= Stopwatch.Frequency * 5)
             {
@@ -85,6 +90,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         private static void Log(long now)
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             long elapsedTicks = now - _lastLogTimestamp;
             _lastLogTimestamp = now;
 

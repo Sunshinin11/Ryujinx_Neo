@@ -12,6 +12,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         private readonly List<(QueryPool, bool)> _activeQueries;
         private CounterQueueEvent _activeConditionalRender;
+        private bool _activeConditionalRenderInverted;
+        private bool _conditionalRenderingActive;
 
         private readonly List<BufferedQuery> _pendingQueryCopies;
         private readonly List<BufferHolder> _activeBufferMirrors;
@@ -122,17 +124,58 @@ namespace Ryujinx.Graphics.Vulkan
 
         public void EndHostConditionalRendering()
         {
-            if (Gd.Capabilities.SupportsConditionalRendering)
+            if (_conditionalRenderingActive)
             {
-                // Gd.ConditionalRenderingApi.CmdEndConditionalRendering(CommandBuffer);
-            }
-            else
-            {
-                // throw new NotSupportedException();
+                Gd.ConditionalRenderingApi.CmdEndConditionalRendering(CommandBuffer);
+                _conditionalRenderingActive = false;
             }
 
             _activeConditionalRender?.ReleaseHostAccess();
             _activeConditionalRender = null;
+        }
+
+        protected override void BeginHostConditionalRenderingForDraw()
+        {
+            if (_activeConditionalRender == null || _conditionalRenderingActive)
+            {
+                return;
+            }
+
+            var buffer = _activeConditionalRender.GetBuffer().Get(Cbs, 0, sizeof(long)).Value;
+            var flags = _activeConditionalRenderInverted ? ConditionalRenderingFlagsEXT.InvertedBitExt : 0;
+
+            var beginInfo = new ConditionalRenderingBeginInfoEXT
+            {
+                SType = StructureType.ConditionalRenderingBeginInfoExt,
+                Buffer = buffer,
+                Offset = 0,
+                Flags = flags,
+            };
+
+            // CmdCopyQueryPoolResults writes this buffer in the transfer stage. Make that value
+            // visible to the conditional-rendering stage before the guest draw consumes it.
+            BufferHolder.InsertBufferBarrier(
+                Gd,
+                CommandBuffer,
+                buffer,
+                AccessFlags.TransferWriteBit,
+                AccessFlags.ConditionalRenderingReadBitExt,
+                PipelineStageFlags.TransferBit,
+                PipelineStageFlags.ConditionalRenderingBitExt,
+                0,
+                sizeof(long));
+
+            Gd.ConditionalRenderingApi.CmdBeginConditionalRendering(CommandBuffer, in beginInfo);
+            _conditionalRenderingActive = true;
+        }
+
+        protected override void EndHostConditionalRenderingForDraw()
+        {
+            if (_conditionalRenderingActive)
+            {
+                Gd.ConditionalRenderingApi.CmdEndConditionalRendering(CommandBuffer);
+                _conditionalRenderingActive = false;
+            }
         }
 
         public bool TryHostConditionalRendering(ICounterEvent value, ulong compare, bool isEqual)
@@ -146,7 +189,8 @@ namespace Ryujinx.Graphics.Vulkan
                 //  - Comparing against 0.
                 //  - Event has not already been flushed.
 
-                if (compare == 0 && evt.Type == CounterType.SamplesPassed && evt.ClearCounter)
+                if (Gd.Capabilities.SupportsConditionalRendering &&
+                    compare == 0 && evt.Type == CounterType.SamplesPassed && evt.ClearCounter)
                 {
                     if (!value.ReserveForHostAccess())
                     {
@@ -155,22 +199,8 @@ namespace Ryujinx.Graphics.Vulkan
                         return false;
                     }
 
-                    if (Gd.Capabilities.SupportsConditionalRendering)
-                    {
-                        // var buffer = evt.GetBuffer().Get(Cbs, 0, sizeof(long)).Value;
-                        // var flags = isEqual ? ConditionalRenderingFlagsEXT.InvertedBitExt : 0;
-
-                        // var conditionalRenderingBeginInfo = new ConditionalRenderingBeginInfoEXT
-                        // {
-                        //     SType = StructureType.ConditionalRenderingBeginInfoExt,
-                        //     Buffer = buffer,
-                        //     Flags = flags,
-                        // };
-
-                        // Gd.ConditionalRenderingApi.CmdBeginConditionalRendering(CommandBuffer, conditionalRenderingBeginInfo);
-                    }
-
                     _activeConditionalRender = evt;
+                    _activeConditionalRenderInverted = isEqual;
                     return true;
                 }
             }
@@ -219,7 +249,9 @@ namespace Ryujinx.Graphics.Vulkan
                 // in use by the current command buffer is above a given limit, and those resources were disposed.
                 _byteWeight += byteWeight;
 
-                if (_byteWeight >= MinByteWeightForFlush)
+                // NEOV2-GPUMEM2: with "Memoria de GPU estilo Eden", submit after 64 MB of released resources
+                // (texture upload buffers during loading screens) instead of 256 MB.
+                if (_byteWeight >= (Ryujinx.Graphics.GAL.GpuMemoryStats.HostRamGuardEnabled ? 64UL * 1024 * 1024 : MinByteWeightForFlush))
                 {
                     FlushCommandsImpl();
                 }

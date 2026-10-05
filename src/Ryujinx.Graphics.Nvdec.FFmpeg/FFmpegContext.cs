@@ -15,7 +15,17 @@ namespace Ryujinx.Graphics.Nvdec.FFmpeg
         private readonly AVPacket* _packet;
         private readonly AVCodecContext* _context;
 
-        public FFmpegContext(AVCodecID codecId)
+        public bool IsReady => _context != null && _packet != null && _decodeFrame != null;
+
+        public FFmpegContext(AVCodecID codecId) : this(codecId, false)
+        {
+        }
+
+        /// <param name="sliceThreads">
+        /// NEOV2-VP9EDEN1: como o Eden (ffmpeg.cpp), usa threads por fatia/tile (thread_count = 0, automatico),
+        /// sem threads por quadro, e as flags LOW_DELAY e FAST.
+        /// </param>
+        public FFmpegContext(AVCodecID codecId, bool sliceThreads)
         {
             _codec = FFmpegApi.avcodec_find_decoder(codecId);
             if (_codec == null)
@@ -31,6 +41,14 @@ namespace Ryujinx.Graphics.Nvdec.FFmpeg
                 Logger.Error?.PrintMsg(LogClass.FFmpeg, "Codec context couldn't be allocated.");
 
                 return;
+            }
+
+            if (sliceThreads)
+            {
+                _ = FFmpegApi.av_opt_set_int(_context, "threads", 0, 0);
+                _ = FFmpegApi.av_opt_set(_context, "thread_type", "slice", 0);
+                _ = FFmpegApi.av_opt_set(_context, "flags", "+low_delay", 0);
+                _ = FFmpegApi.av_opt_set(_context, "flags2", "+fast", 0);
             }
 
             if (FFmpegApi.avcodec_open2(_context, _codec, null) != 0)
@@ -155,6 +173,43 @@ namespace Ryujinx.Graphics.Nvdec.FFmpeg
             }
 
             return result < 0 ? result : 0;
+        }
+
+        /// <summary>
+        /// NEOV2-VP9EDEN1: decodifica um pacote sem pedir quadros atrasados. Quadros VP9 ocultos
+        /// nao geram saida (gotFrame = false) e isso nao e erro. Retorna o codigo do FFmpeg (&lt; 0 = erro).
+        /// </summary>
+        public int DecodeFrameNoFlush(Surface output, ReadOnlySpan<byte> bitstream, out bool gotFrame)
+        {
+            gotFrame = false;
+
+            if (!IsReady || output.Frame == null)
+            {
+                return -1;
+            }
+
+            FFmpegApi.av_frame_unref(output.Frame);
+
+            int result;
+            int got;
+
+            fixed (byte* ptr = bitstream)
+            {
+                _packet->Data = ptr;
+                _packet->Size = bitstream.Length;
+                result = _decodeFrame(_context, output.Frame, &got, _packet);
+            }
+
+            FFmpegApi.av_packet_unref(_packet);
+
+            if (got == 0)
+            {
+                FFmpegApi.av_frame_unref(output.Frame);
+            }
+
+            gotFrame = got != 0;
+
+            return result;
         }
 
         public void Dispose()

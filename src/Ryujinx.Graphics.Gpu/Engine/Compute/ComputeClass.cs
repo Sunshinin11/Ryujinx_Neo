@@ -1,5 +1,4 @@
 using Ryujinx.Graphics.Device;
-using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Gpu.Engine.InlineToMemory;
 using Ryujinx.Graphics.Gpu.Engine.Threed;
 using Ryujinx.Graphics.Gpu.Engine.Types;
@@ -145,8 +144,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
 
             CachedShaderProgram cs = memoryManager.Physical.ShaderCache.GetComputeShader(_channel, samplerPoolMaximumId, poolState, computeState, shaderGpuVa);
 
-            GraphicsCompatibility.RegisterMua3Program(cs.HostProgram, new Mua3ShaderIdentity(0, shaderGpuVa, 0, 0, 0, 0));
-
             _context.Renderer.Pipeline.SetProgram(cs.HostProgram);
 
             _channel.TextureManager.SetComputeSamplerPool(samplerPoolGpuVa, _state.State.SetTexSamplerPoolCMaximumIndex, qmd.SamplerIndex);
@@ -159,22 +156,19 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
             {
                 BufferDescriptor sb = info.SBuffers[index];
 
+                if (TextureArrayFeedback.IsFeedbackBuffer(sb))
+                {
+                    // NEOV2-ARRAYFB1: host buffer, not guest memory.
+                    _channel.BufferManager.SetComputeTextureArrayFeedback(sb.Slot);
+                    continue;
+                }
+
                 ulong sbDescAddress = _channel.BufferManager.GetComputeUniformBufferAddress(sb.SbCbSlot);
                 sbDescAddress += (ulong)sb.SbCbOffset * 4;
 
                 SbDescriptor sbDescriptor = _channel.MemoryManager.Physical.Read<SbDescriptor>(sbDescAddress);
 
-                uint size;
-                if (sb.SbCbSlot == Constants.DriverReservedUniformBuffer)
-                {
-                    // Only trust the SbDescriptor size if it comes from slot 0.
-                    size = (uint)sbDescriptor.Size;
-                }
-                else
-                {
-                    // TODO: Use full mapped size and somehow speed up buffer sync.
-                    size = (uint)_channel.MemoryManager.GetMappedSize(sbDescriptor.PackAddress(), Constants.MaxUnknownStorageSize);
-                }
+                uint size = NeoStorageBufferSize.FromDriverDescriptor(_channel.MemoryManager, sbDescriptor, -1, sb.SbCbSlot);
 
                 _channel.BufferManager.SetComputeStorageBuffer(sb.Slot, sbDescriptor.PackAddress(), size, sb.Flags);
             }
@@ -191,8 +185,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
                     _channel.BufferManager.HasUnalignedStorageBuffers);
 
                 cs = memoryManager.Physical.ShaderCache.GetComputeShader(_channel, samplerPoolMaximumId, poolState, computeState, shaderGpuVa);
-
-                GraphicsCompatibility.RegisterMua3Program(cs.HostProgram, new Mua3ShaderIdentity(0, shaderGpuVa, 0, 0, 0, 0));
 
                 _context.Renderer.Pipeline.SetProgram(cs.HostProgram);
             }

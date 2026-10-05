@@ -262,11 +262,6 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 if (_fault == null)
                 {
-                    if (error is VulkanSubmissionDeviceLostException)
-                    {
-                        Mua3CrashTelemetry.LogDeviceLost(operation, timelineValue, sequence);
-                    }
-
                     _fault = ExceptionDispatchInfo.Capture(error);
                     _faultOperation = operation;
                     _faultTimelineValue = timelineValue;
@@ -324,12 +319,6 @@ namespace Ryujinx.Graphics.Vulkan
 
             bool wakeWorker = _workQueue.Count == 0;
             item.Sequence = (ulong)Interlocked.Increment(ref _nextSequence);
-
-            if (item.Type == WorkType.Submit)
-            {
-                Mua3CrashTelemetry.RecordSubmission(item.CommandBuffer, item.TimelineValue, item.Sequence);
-            }
-
             _workQueue.Enqueue(item);
 
             if (GezinjinxPerformanceMode.DetailedTelemetry)
@@ -808,6 +797,7 @@ namespace Ryujinx.Graphics.Vulkan
 
                     BaselineTelemetry.TryFlush();
                     TextureFormatTelemetry.TryFlush();
+                    ReadbackDecisionTelemetry.TryLogSnapshot();
                     PipelineCachePersistence.TryPeriodicSave();
                 }
             }

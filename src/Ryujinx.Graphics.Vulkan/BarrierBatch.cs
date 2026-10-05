@@ -345,22 +345,17 @@ namespace Ryujinx.Graphics.Vulkan
                                 // Keep the dependency as a memory barrier inside the pass (covered by the
                                 // subpass self-dependency), so the pass is not split and the data is visible.
 
-                                (AccessFlags superAccess, PipelineStageFlags superStages) = GetSubpassAccessSuperset(_gd);
+                                (AccessFlags superAccess, _) = GetSubpassAccessSuperset(_gd);
 
                                 foreach (BarrierWithStageFlags<ImageMemoryBarrier, TextureStorage> barrier in _imageBarriers)
                                 {
-                                    PipelineStageFlags src = barrier.Flags.Source & superStages;
-                                    PipelineStageFlags dst = barrier.Flags.Dest & superStages;
+                                    PipelineStageFlags src = ToGraphicsStages(
+                                        barrier.Flags.Source,
+                                        PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.LateFragmentTestsBit);
 
-                                    if (src == PipelineStageFlags.None)
-                                    {
-                                        src = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.LateFragmentTestsBit;
-                                    }
-
-                                    if (dst == PipelineStageFlags.None)
-                                    {
-                                        dst = PipelineStageFlags.FragmentShaderBit;
-                                    }
+                                    PipelineStageFlags dst = ToGraphicsStages(
+                                        barrier.Flags.Dest,
+                                        PipelineStageFlags.FragmentShaderBit);
 
                                     _memoryBarriers.Add(new BarrierWithStageFlags<MemoryBarrier, int>(
                                         new StageFlags(src, dst),
@@ -462,6 +457,19 @@ namespace Ryujinx.Graphics.Vulkan
                         _imageBarrierBatch.Pointer);
                 }
             }
+        }
+
+        private static PipelineStageFlags ToGraphicsStages(PipelineStageFlags stages, PipelineStageFlags fallback)
+        {
+            // NEOV2 Etapa 10: only stages covered by the subpass self-dependency (graphics) are valid in a render pass.
+            if ((stages & PipelineStageFlags.AllCommandsBit) != 0)
+            {
+                return PipelineStageFlags.AllGraphicsBit;
+            }
+
+            stages &= ~(PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.TransferBit | PipelineStageFlags.HostBit);
+
+            return stages == PipelineStageFlags.None ? fallback : stages;
         }
 
         private void QueueIncoherentBarrier(IncoherentBarrierType type)

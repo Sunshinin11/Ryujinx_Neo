@@ -1,4 +1,4 @@
-using Ryujinx.Common.Logging;
+﻿using Ryujinx.Common.Logging;
 using System;
 using System.Diagnostics;
 using System.Threading;

@@ -1,4 +1,5 @@
 using Ryujinx.Cpu.Nce.Arm64;
+using Ryujinx.Common;
 using Ryujinx.Common.Logging;
 using System;
 using System.Runtime.InteropServices;
@@ -8,15 +9,48 @@ namespace Ryujinx.Cpu.Nce
     public static class NcePatcher
     {
         private const int ScratchBaseReg = 19;
+        private const int LinuxUContextSpOffset = 432;
+        private const int LinuxUContextPcOffset = 440;
+        private const int LinuxUContextPstateOffset = 448;
+        private const int DarwinUContextMContextOffset = 48;
+        private const int DarwinMContextSpOffset = 264;
+        private const int DarwinMContextPcOffset = 272;
+
+        private const uint PstateNzcvMask = 0xf0000000u;
 
         private const uint IntCalleeSavedRegsMask = 0x1ff80000; // X19 to X28
         private const uint FpCalleeSavedRegsMask = 0xff00; // D8 to D15
+
+        // Linux/glibc owns TPIDR_EL0 just like Bionic, but its value is stable for
+        // the lifetime of the host thread. Use it only as the key to the bounded
+        // index; guest TPIDR accesses remain redirected to NceNativeContext.
+        // A bucket miss still falls back to the original bounded thread table.
+        internal static bool UsesThreadContextIndex =>
+            PlatformInfo.IsBionic || OperatingSystem.IsLinux();
 
         public static NceCpuCodePatch CreatePatch(ReadOnlySpan<byte> textSection)
         {
             NceCpuCodePatch codePatch = new();
 
             ReadOnlySpan<uint> textUint = MemoryMarshal.Cast<byte, uint>(textSection);
+
+            int orderedExclusives = 0;
+
+            // Identify specifically the Link's Awakening main text by the known
+            // +0x10CE518 sequence. This keeps the +0x10 census out of SDK/modules.
+            bool isLinksMainText = false;
+
+            for (int probe = 2; probe + 1 < textUint.Length; probe++)
+            {
+                if (textUint[probe - 2] == 0xf9000668u && // str x8, [x19,#8]
+                    textUint[probe - 1] == 0xf9400a68u && // ldr x8, [x19,#0x10]
+                    textUint[probe]     == 0xf9000a60u && // str x0, [x19,#0x10]
+                    textUint[probe + 1] == 0xb4000088u)   // cbz x8,...
+                {
+                    isLinksMainText = true;
+                    break;
+                }
+            }
 
             for (int i = 0; i < textUint.Length; i++)
             {
@@ -59,9 +93,207 @@ namespace Ryujinx.Cpu.Nce
                     codePatch.AddCode(i, WriteMsrTpidrEl0Patch(rd));
                     Logger.Debug?.Print(LogClass.Cpu, $"Patched MSR tpidr_el0, x{rd} at 0x{address:X}.");
                 }
+                else if (((inst >> 23) & 0x7fu) == 0x10u && !IsEdenExclusive(inst))
+                {
+                    // A máscara também casa com palavras/dados que não são
+                    // instruções exclusivas ARM64 válidas. Deixe-as intactas.
+                }
+                else if (((inst >> 23) & 0x7fu) == 0x10u)
+                {
+                    // NEOV2 NCE-EXCL1:
+                    // LDXR/STXR/LDXP/STXP -> ordered variants.
+                    uint ordered = inst | (1u << 15);
+
+                    if (ordered != inst)
+                    {
+                        codePatch.ReplaceInstruction(i, ordered);
+                        orderedExclusives++;
+                    }
+                }
+                else if (
+                    OperatingSystem.IsLinux() &&
+                    address == 0x2b3d3f4 &&
+                    i >= 1 &&
+                    i + 1 < textUint.Length &&
+                    textUint[i - 1] == 0xd0013268u && // adrp x8, main+0x5191000
+                    inst == 0x39682109u &&             // ldrb w9,[x8,#0xa08]
+                    textUint[i + 1] == 0x7100053fu)   // cmp w9,#1
+                {
+                    // Kingdom Come: Deliverance v1.9.6H can reach this optional
+                    // resource setup while the engine service at main+0x5191a88
+                    // is still null. The original code allocates and updates its
+                    // counters before dereferencing the service. Return through
+                    // the function's normal epilogue before those side effects.
+                    codePatch.AddCode(i, WriteKcdMissingServiceGuardPatch());
+
+                    Logger.Warning?.Print(
+                        LogClass.Cpu,
+                        $"[NEOV2-KCD-SERVICE1] guarded missing service at text+0x{address:X}.");
+                }
+                else if (
+                    OperatingSystem.IsLinux() &&
+                    i >= 2 &&
+                    i + 6 < textUint.Length &&
+                    textUint[i - 2] == 0x3919327fu && // strb wzr, [x19,#0x64c]
+                    textUint[i - 1] == 0xb9065a7fu && // str  wzr, [x19,#0x658]
+                    inst == 0xf903327fu &&             // str  xzr, [x19,#0x660]
+                    textUint[i + 1] == 0xf903367fu && // str  xzr, [x19,#0x668]
+                    textUint[i + 2] == 0xf9033a7fu && // str  xzr, [x19,#0x670]
+                    textUint[i + 3] == 0xf9033e7fu && // str  xzr, [x19,#0x678]
+                    textUint[i + 4] == 0xb9069274u && // str  w20, [x19,#0x690]
+                    textUint[i + 5] == 0xf9034e7fu && // str  xzr, [x19,#0x698]
+                    textUint[i + 6] == 0x790d4274u)   // strh w20, [x19,#0x6a0]
+                {
+                    // Kingdom Come: Deliverance v1.9.6H leaves the pointer pair
+                    // at +0x680/+0x688 uninitialized, then attempts to destroy
+                    // the stale +0x680 value if resource creation fails. Zero
+                    // the pair while preserving all adjacent constructor stores.
+                    codePatch.AddCode(i, WriteKcdUninitializedPairPatch());
+
+                    Logger.Warning?.Print(
+                        LogClass.Cpu,
+                        $"[NEOV2-KCD-INIT1] initialized pointer pair at text+0x{address:X}.");
+                }
+                else if (
+                    (OperatingSystem.IsLinux() || PlatformInfo.IsBionic) &&
+                    isLinksMainText &&
+                    address == 0x10CCE08 &&
+                    i >= 2 &&
+                    i + 2 < textUint.Length &&
+                    textUint[i - 2] == 0xb0005c28u && // adrp x8, main+0x1C51000
+                    textUint[i - 1] == 0x910d6108u && // add x8, x8, #0x358
+                    inst == 0xf9000008u &&             // str x8, [x0]
+                    textUint[i + 1] == 0xf900081fu && // str xzr, [x0,#0x10]
+                    textUint[i + 2] == 0xd65f03c0u)   // ret
+                {
+                    codePatch.AddCode(i, WriteLinksAwakeningGenerationGuardPatch());
+
+                    Logger.Warning?.Print(
+                        LogClass.Cpu,
+                        $"[NCE-LINKS-GENERATION-GUARD] applied at text+0x{address:X}.");
+                }
+                else if (
+                    OperatingSystem.IsLinux() &&
+                    i >= 2 &&
+                    i + 5 < textUint.Length &&
+                    textUint[i - 2] == 0x9108e12bu && // add x11, x9, #0x238
+                    textUint[i - 1] == 0xf9400173u && // ldr x19, [x11]
+                    inst == 0xcb3363ffu &&             // sub sp, sp, x19
+                    textUint[i + 1] == 0x910003ebu && // mov x11, sp
+                    textUint[i + 2] == 0x91010129u && // add x9, x9, #0x40
+                    textUint[i + 3] == 0xb940014fu && // ldr w15, [x10]
+                    textUint[i + 4] == 0x710001ffu && // cmp w15, #0
+                    textUint[i + 5] == 0x710005ffu)   // cmp w15, #1
+                {
+                    codePatch.AddCode(i, WriteAlignedDynamicStackPatch());
+
+                    Logger.Warning?.Print(
+                        LogClass.Cpu,
+                        $"NCE Linux: aligned dynamic guest SP reservation at text+0x{address:X}.");
+                }
             }
 
+            Logger.Info?.Print(
+                LogClass.Cpu,
+                $"[NEOV2-NCE-EXCL1] {orderedExclusives} exclusive accesses converted to ordered");
+
             return codePatch;
+        }
+
+        private static uint[] WriteKcdUninitializedPairPatch()
+        {
+            return new uint[]
+            {
+                0x91180260u, // add x0, x19, #0x600 (x0 is overwritten before its next use)
+                0xa9067c1fu, // stp xzr, xzr, [x0,#0x60] (+0x660/+0x668)
+                0xa9077c1fu, // stp xzr, xzr, [x0,#0x70] (+0x670/+0x678)
+                0xa9087c1fu, // stp xzr, xzr, [x0,#0x80] (+0x680/+0x688)
+                0x14000000u, // b <original instruction + 4>
+            };
+        }
+
+        private static uint[] WriteKcdMissingServiceGuardPatch()
+        {
+            return new uint[]
+            {
+                0xf945450au, // ldr x10, [x8,#0xa88] (x8 set by original ADRP)
+                0xb50000aau, // cbnz x10, <continue original code>
+                0xa9424ff4u, // ldp x20, x19, [sp,#0x20]
+                0xa9417bfdu, // ldp x29, x30, [sp,#0x10]
+                0x9100c3ffu, // add sp, sp, #0x30
+                0xd65f03c0u, // ret
+                0x39682109u, // ldrb w9, [x8,#0xa08] (original instruction)
+                0x14000000u, // b <original instruction + 4>
+            };
+        }
+
+        private static uint[] WriteLinksAwakeningGenerationGuardPatch()
+        {
+            Assembler asm = new();
+            Operand performReset = asm.CreateLabel();
+
+            // At +10CCE08:
+            //   X0 = embedded PhysX task
+            //   X8 = base vtable at main+0x1C51358
+            //
+            // The affected live generation uses the derived vtable at
+            // main+0x1C51308, exactly 0x50 below X8. A non-zero refcount means
+            // the object was reacquired after an older queue entry reached
+            // zero. Returning here prevents that old finalizer from clearing
+            // the live generation's vtable and task-manager pointer.
+            RegisterSaveRestore saveRestore = new(
+                (1 << 25) |
+                (1 << 26));
+
+            saveRestore.WritePrologue(asm);
+            asm.MrsNzcv(Gpr(26));
+
+            asm.LdrRiUn(Gpr(25, OperandType.I32), Gpr(0), 0x20);
+            asm.Cbz(Gpr(25, OperandType.I32), performReset);
+            asm.LdrRiUn(Gpr(25), Gpr(0), 0);
+            asm.Add(Gpr(25), Gpr(25), Const(0x50));
+            asm.Cmp(Gpr(25), Gpr(8));
+            asm.B(performReset, ArmCondition.Ne);
+
+            asm.MsrNzcv(Gpr(26));
+            saveRestore.WriteEpilogue(asm);
+            asm.Ret(Gpr(30));
+
+            asm.MarkLabel(performReset);
+            asm.MsrNzcv(Gpr(26));
+            saveRestore.WriteEpilogue(asm);
+
+            // Original guest instruction. The following original instruction
+            // clears [X0+0x10] only on the normal reset path.
+            asm.StrRiUn(Gpr(8), Gpr(0), 0);
+            asm.B(0);
+
+            return asm.GetCode();
+        }
+
+        private static bool IsEdenExclusive(uint inst)
+        {
+            bool pair = ((inst >> 21) & 1u) != 0;
+            bool fixedRt2 = ((inst >> 10) & 0x1fu) == 0x1fu;
+
+            return pair || fixedRt2;
+        }
+
+        private static uint[] WriteAlignedDynamicStackPatch()
+        {
+            // Linux AArch64 requires SP alignment for SP-based memory accesses.
+            // Some Switch guest code deliberately uses smaller stack reservations.
+            //
+            // x19 = original dynamic reservation size.
+            // Round x19 up to 16 so the existing add sp, sp, x19 after the call
+            // restores exactly the amount reserved here.
+            return new uint[]
+            {
+                0x91003e73u, // add x19, x19, #15
+                0x927cee73u, // and x19, x19, #0xfffffffffffffff0
+                0xcb3363ffu, // sub sp, sp, x19
+                0x14000000u, // b <original instruction + 4>
+            };
         }
 
         private static uint[] WriteSvcPatch(uint svcId)
@@ -148,15 +380,27 @@ namespace Ryujinx.Cpu.Nce
         {
             Assembler asm = new();
 
-            Span<int> scratchRegs = stackalloc int[3];
+            Span<int> scratchRegs = stackalloc int[5];
             PickScratchRegs(scratchRegs, 1u << (int)rd);
 
-            RegisterSaveRestore rsr = new((1 << scratchRegs[0]) | (1 << scratchRegs[1]) | (1 << scratchRegs[2]));
+            RegisterSaveRestore rsr = new(
+                (1 << scratchRegs[0]) |
+                (1 << scratchRegs[1]) |
+                (1 << scratchRegs[2]) |
+                (1 << scratchRegs[3]) |
+                (1 << scratchRegs[4]));
 
             rsr.WritePrologue(asm);
 
-            WriteLoadContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]), Gpr(scratchRegs[2]));
-            asm.StrRiUn(Gpr((int)rd), Gpr(scratchRegs[0]),NceNativeContext.GetTpidrEl0Offset());
+            WriteMrsNzcv(asm, Gpr(scratchRegs[4]));
+            WriteLoadContext(
+                asm,
+                Gpr(scratchRegs[0]),
+                Gpr(scratchRegs[1]),
+                Gpr(scratchRegs[2]),
+                Gpr(scratchRegs[3]));
+            asm.StrRiUn(Gpr((int)rd), Gpr(scratchRegs[0]), NceNativeContext.GetTpidrEl0Offset());
+            WriteMsrNzcv(asm, Gpr(scratchRegs[4]));
 
             rsr.WriteEpilogue(asm);
 
@@ -169,15 +413,32 @@ namespace Ryujinx.Cpu.Nce
         {
             Assembler asm = new();
 
-            Span<int> scratchRegs = stackalloc int[3];
+            Span<int> scratchRegs = stackalloc int[5];
             PickScratchRegs(scratchRegs, 1u << (int)rd);
 
-            RegisterSaveRestore rsr = new((1 << scratchRegs[0]) | (1 << scratchRegs[1]) | (1 << scratchRegs[2]));
+            RegisterSaveRestore rsr = new(
+                (1 << scratchRegs[0]) |
+                (1 << scratchRegs[1]) |
+                (1 << scratchRegs[2]) |
+                (1 << scratchRegs[3]) |
+                (1 << scratchRegs[4]));
 
             rsr.WritePrologue(asm);
 
-            WriteLoadContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]), Gpr(scratchRegs[2]));
-            asm.Add(Gpr((int)rd), Gpr(scratchRegs[0]), Const((ulong)contextOffset));
+            // MRS TPIDR_EL0/TPIDRRO_EL0/CTR_EL0 does not modify NZCV.
+            // WriteLoadContext uses CMP internally, so preserve guest flags.
+            WriteMrsNzcv(asm, Gpr(scratchRegs[4]));
+            WriteLoadContext(
+                asm,
+                Gpr(scratchRegs[0]),
+                Gpr(scratchRegs[1]),
+                Gpr(scratchRegs[2]),
+                Gpr(scratchRegs[3]));
+            asm.Add(
+                Gpr((int)rd),
+                Gpr(scratchRegs[0]),
+                Const((ulong)contextOffset));
+            WriteMsrNzcv(asm, Gpr(scratchRegs[4]));
 
             rsr.WriteEpilogue(asm);
 
@@ -188,9 +449,47 @@ namespace Ryujinx.Cpu.Nce
             return asm.GetCode();
         }
 
-        private static void WriteLoadContext(Assembler asm, Operand tmp0, Operand tmp1, Operand tmp2)
+        private static void WriteTryLoadIndexedContext(Assembler asm, Operand lblFound, Operand tmp0, Operand tmp1, Operand tmp2)
         {
+            asm.MrsTpidrEl0(tmp1);
+            asm.Mov(tmp2, NceThreadContextIndex.HashMultiplier);
+            asm.Mul(tmp2, tmp1, tmp2);
+            asm.Lsr(tmp2, tmp2, Const((ulong)(64 - NceThreadContextIndex.BucketBits)));
+            asm.Mov(tmp0, (ulong)NceThreadContextIndex.EntriesPointer);
+            asm.Add(tmp0, tmp0, tmp2, ArmShiftType.Lsl, NceThreadContextIndex.BucketStrideShift);
+
+            for (int way = 0; way < NceThreadContextIndex.Ways; way++)
+            {
+                asm.LdrRiPost(tmp2, tmp0, NceThreadContextIndex.EntrySize);
+                asm.Cmp(tmp1, tmp2);
+                asm.B(lblFound, ArmCondition.Eq);
+            }
+        }
+
+        private static void WriteLoadContext(Assembler asm, Operand tmp0, Operand tmp1, Operand tmp2, Operand tmp3)
+        {
+            Operand lblFastFound = default;
+            Operand lblDone = default;
+
+            if (UsesThreadContextIndex)
+            {
+                lblFastFound = asm.CreateLabel();
+                lblDone = asm.CreateLabel();
+                WriteTryLoadIndexedContext(asm, lblFastFound, tmp0, tmp1, tmp2);
+            }
+
             asm.Mov(tmp0, (ulong)NceThreadTable.EntriesPointer);
+            asm.Ldur(tmp3, tmp0, -8);
+
+            Operand lblFound = asm.CreateLabel();
+            Operand lblLoop = asm.CreateLabel();
+            Operand lblFail = asm.CreateLabel();
+
+            // Validate the published count before deriving the end pointer.
+            asm.Mov(tmp2, (ulong)NceThreadTable.MaxThreads);
+            asm.Cmp(tmp3, tmp2);
+            asm.B(lblFail, ArmCondition.GtUn);
+            asm.Add(tmp3, tmp0, tmp3, ArmShiftType.Lsl, 4);
 
             if (OperatingSystem.IsMacOS())
             {
@@ -201,23 +500,46 @@ namespace Ryujinx.Cpu.Nce
                 asm.MrsTpidrEl0(tmp1);
             }
 
-            Operand lblFound = asm.CreateLabel();
-            Operand lblLoop = asm.CreateLabel();
-
             asm.MarkLabel(lblLoop);
 
+            // Keep the normal path lock-free, but never walk past the published
+            // entries when TPIDR_EL0 is missing because of a lifecycle bug.
+            asm.Cmp(tmp0, tmp3);
+            asm.B(lblFail, ArmCondition.GeUn);
             asm.LdrRiPost(tmp2, tmp0, 16);
             asm.Cmp(tmp1, tmp2);
             asm.B(lblFound, ArmCondition.Eq);
             asm.B(lblLoop);
 
+            asm.MarkLabel(lblFail);
+            asm.Brk();
+            asm.B(lblFail);
+
             asm.MarkLabel(lblFound);
 
             asm.Ldur(tmp0, tmp0, -8);
+
+            if (UsesThreadContextIndex)
+            {
+                asm.B(lblDone);
+                asm.MarkLabel(lblFastFound);
+                asm.Ldur(tmp0, tmp0, -8);
+                asm.MarkLabel(lblDone);
+            }
         }
 
         private static void WriteLoadContextSafe(Assembler asm, Operand lblFail, Operand tmp0, Operand tmp1, Operand tmp2, Operand tmp3)
         {
+            Operand lblFastFound = default;
+            Operand lblDone = default;
+
+            if (UsesThreadContextIndex)
+            {
+                lblFastFound = asm.CreateLabel();
+                lblDone = asm.CreateLabel();
+                WriteTryLoadIndexedContext(asm, lblFastFound, tmp0, tmp1, tmp2);
+            }
+
             asm.Mov(tmp0, (ulong)NceThreadTable.EntriesPointer);
             asm.Ldur(tmp3, tmp0, -8);
             asm.Add(tmp3, tmp0, tmp3, ArmShiftType.Lsl, 4);
@@ -246,6 +568,14 @@ namespace Ryujinx.Cpu.Nce
             asm.MarkLabel(lblFound);
 
             asm.Ldur(tmp0, tmp0, -8);
+
+            if (UsesThreadContextIndex)
+            {
+                asm.B(lblDone);
+                asm.MarkLabel(lblFastFound);
+                asm.Ldur(tmp0, tmp0, -8);
+                asm.MarkLabel(lblDone);
+            }
         }
 
         private static void PickScratchRegs(Span<int> scratchRegs, uint blacklistedRegMask)
@@ -288,6 +618,67 @@ namespace Ryujinx.Cpu.Nce
             return new Operand(type, value);
         }
 
+        private static void WriteMrsNzcv(Assembler asm, Operand rt) => asm.Mrs(rt, 1, 3, 4, 2, 0);
+        private static void WriteMsrNzcv(Assembler asm, Operand rt) => asm.WriteInstruction(0xd51b4200u, rt);
+        private static void WriteMrsFpcr(Assembler asm, Operand rt) => asm.Mrs(rt, 1, 3, 4, 4, 0);
+        private static void WriteMsrFpcr(Assembler asm, Operand rt) => asm.WriteInstruction(0xd51b4400u, rt);
+        private static void WriteMrsFpsr(Assembler asm, Operand rt) => asm.Mrs(rt, 1, 3, 4, 4, 1);
+        private static void WriteMsrFpsr(Assembler asm, Operand rt) => asm.WriteInstruction(0xd51b4420u, rt);
+
+        private static void WriteStoreGuestFpStateToContext(Assembler asm, Operand ctx, Operand tmp)
+        {
+            Operand tmp32 = Gpr(tmp.GetRegister().Index, OperandType.I32);
+            WriteMrsFpcr(asm, tmp);
+            asm.StrRiUn(tmp32, ctx, NceNativeContext.GetFpcrOffset());
+            WriteMrsFpsr(asm, tmp);
+            asm.StrRiUn(tmp32, ctx, NceNativeContext.GetFpsrOffset());
+        }
+
+        private static void WriteLoadGuestFpStateFromContext(Assembler asm, Operand ctx, Operand tmp)
+        {
+            Operand tmp32 = Gpr(tmp.GetRegister().Index, OperandType.I32);
+            asm.LdrRiUn(tmp32, ctx, NceNativeContext.GetFpcrOffset());
+            WriteMsrFpcr(asm, tmp);
+            asm.LdrRiUn(tmp32, ctx, NceNativeContext.GetFpsrOffset());
+            WriteMsrFpsr(asm, tmp);
+        }
+
+        private static void WriteStoreHostFpStateToContext(Assembler asm, Operand ctx, Operand tmp)
+        {
+            Operand tmp32 = Gpr(tmp.GetRegister().Index, OperandType.I32);
+            WriteMrsFpcr(asm, tmp);
+            asm.StrRiUn(tmp32, ctx, NceNativeContext.GetHostFpcrOffset());
+            WriteMrsFpsr(asm, tmp);
+            asm.StrRiUn(tmp32, ctx, NceNativeContext.GetHostFpsrOffset());
+        }
+
+        private static void WriteLoadHostFpStateFromContext(Assembler asm, Operand ctx, Operand tmp)
+        {
+            Operand tmp32 = Gpr(tmp.GetRegister().Index, OperandType.I32);
+            asm.LdrRiUn(tmp32, ctx, NceNativeContext.GetHostFpcrOffset());
+            WriteMsrFpcr(asm, tmp);
+            asm.LdrRiUn(tmp32, ctx, NceNativeContext.GetHostFpsrOffset());
+            WriteMsrFpsr(asm, tmp);
+        }
+
+        private static void WriteStoreNzcvToContext(Assembler asm, Operand ctx, Operand tmp, Operand nzcv)
+        {
+            Operand tmp32 = Gpr(tmp.GetRegister().Index, OperandType.I32);
+            Operand nzcv32 = Gpr(nzcv.GetRegister().Index, OperandType.I32);
+            asm.LdrRiUn(tmp32, ctx, NceNativeContext.GetPstateOffset());
+            asm.And(tmp32, tmp32, Const(OperandType.I32, ~PstateNzcvMask & uint.MaxValue));
+            asm.And(nzcv32, nzcv32, Const(OperandType.I32, PstateNzcvMask));
+            asm.Orr(tmp32, tmp32, nzcv32);
+            asm.StrRiUn(tmp32, ctx, NceNativeContext.GetPstateOffset());
+        }
+
+        private static void WriteLoadNzcvFromContext(Assembler asm, Operand ctx, Operand tmp)
+        {
+            Operand tmp32 = Gpr(tmp.GetRegister().Index, OperandType.I32);
+            asm.LdrRiUn(tmp32, ctx, NceNativeContext.GetPstateOffset());
+            WriteMsrNzcv(asm, tmp);
+        }
+
         private static uint GetImm26(ulong sourceAddress, ulong targetAddress)
         {
             long offset = (long)(targetAddress - sourceAddress);
@@ -321,14 +712,24 @@ namespace Ryujinx.Cpu.Nce
             int intMask = 0x7fffffff & (int)~blacklistedRegMask;
             int vecMask = unchecked((int)0xffffffff);
 
-            Span<int> scratchRegs = stackalloc int[3];
+            Span<int> scratchRegs = stackalloc int[5];
             PickScratchRegs(scratchRegs, blacklistedRegMask);
 
             RegisterSaveRestore rsr = new(intMask, vecMask, OperandType.V128);
 
             rsr.WritePrologue(asm);
 
-            WriteLoadContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]), Gpr(scratchRegs[2]));
+            WriteMrsNzcv(asm, Gpr(scratchRegs[4]));
+            WriteLoadContext(
+                asm,
+                Gpr(scratchRegs[0]),
+                Gpr(scratchRegs[1]),
+                Gpr(scratchRegs[2]),
+                Gpr(scratchRegs[3]));
+            WriteStoreNzcvToContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]), Gpr(scratchRegs[4]));
+
+            WriteStoreGuestFpStateToContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]));
+            WriteLoadHostFpStateFromContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]));
 
             asm.MovSp(Gpr(scratchRegs[1]), Gpr(Assembler.SpRegister));
             asm.StrRiUn(Gpr(scratchRegs[1]), Gpr(scratchRegs[0]), NceNativeContext.GetGuestSPOffset());
@@ -336,6 +737,9 @@ namespace Ryujinx.Cpu.Nce
             asm.MovSp(Gpr(Assembler.SpRegister), Gpr(scratchRegs[1]));
 
             writeCall(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]), Gpr(scratchRegs[2]));
+
+            WriteLoadGuestFpStateFromContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]));
+            WriteLoadNzcvFromContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]));
 
             asm.LdrRiUn(Gpr(scratchRegs[1]), Gpr(scratchRegs[0]), NceNativeContext.GetGuestSPOffset());
             asm.MovSp(Gpr(Assembler.SpRegister), Gpr(scratchRegs[1]));
@@ -349,6 +753,8 @@ namespace Ryujinx.Cpu.Nce
 
             CreateRegisterSaveRestoreForManaged().WritePrologue(asm);
 
+            WriteStoreHostFpStateToContext(asm, Gpr(0), Gpr(1));
+
             asm.MovSp(Gpr(1), Gpr(Assembler.SpRegister));
             asm.StrRiUn(Gpr(1), Gpr(0), NceNativeContext.GetHostSPOffset());
 
@@ -361,6 +767,9 @@ namespace Ryujinx.Cpu.Nce
             {
                 asm.LdpRiUn(Vec(i), Vec(i + 1), Gpr(0), NceNativeContext.GetVOffset(i));
             }
+
+            WriteLoadGuestFpStateFromContext(asm, Gpr(0), Gpr(1));
+            WriteLoadNzcvFromContext(asm, Gpr(0), Gpr(1));
 
             asm.LdpRiUn(Gpr(30), Gpr(1), Gpr(0), NceNativeContext.GetXOffset(30));
             asm.MovSp(Gpr(Assembler.SpRegister), Gpr(1));
@@ -389,14 +798,21 @@ namespace Ryujinx.Cpu.Nce
 
             WriteLoadContextSafe(asm, lblFail, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]), Gpr(scratchRegs[2]), Gpr(scratchRegs[3]));
 
-            asm.LdrRiUn(Gpr(scratchRegs[1]), Gpr(scratchRegs[0]), NceNativeContext.GetHostSPOffset());
-            asm.MovSp(Gpr(scratchRegs[2]), Gpr(Assembler.SpRegister));
-            asm.MovSp(Gpr(Assembler.SpRegister), Gpr(scratchRegs[1]));
-
             asm.Cmp(Gpr(0, OperandType.I32), Const((ulong)NceThreadPal.UnixSuspendSignal));
             asm.B(lblFail, ArmCondition.Ne);
 
-            // SigUsr2
+            if (OperatingSystem.IsLinux() || PlatformInfo.IsBionic)
+            {
+                asm.LdrRiUn(Gpr(scratchRegs[1]), Gpr(2), LinuxUContextPstateOffset);
+                asm.StrRiUn(Gpr(scratchRegs[1], OperandType.I32), Gpr(scratchRegs[0]), NceNativeContext.GetPstateOffset());
+            }
+
+            WriteStoreGuestFpStateToContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]));
+            WriteLoadHostFpStateFromContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]));
+
+            asm.LdrRiUn(Gpr(scratchRegs[1]), Gpr(scratchRegs[0]), NceNativeContext.GetHostSPOffset());
+            asm.MovSp(Gpr(scratchRegs[2]), Gpr(Assembler.SpRegister));
+            asm.MovSp(Gpr(Assembler.SpRegister), Gpr(scratchRegs[1]));
 
             asm.Mov(Gpr(scratchRegs[1], OperandType.I32), Const(OperandType.I32, 1));
             asm.StrRiUn(Gpr(scratchRegs[1], OperandType.I32), Gpr(scratchRegs[0]), NceNativeContext.GetInManagedOffset());
@@ -409,6 +825,8 @@ namespace Ryujinx.Cpu.Nce
             // TODO: Check return value, exit if we must.
 
             WriteInManagedLockReleaseForSuspendHandler(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]), Gpr(scratchRegs[3]), lblAgain);
+
+            WriteLoadGuestFpStateFromContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]));
 
             asm.MovSp(Gpr(Assembler.SpRegister), Gpr(scratchRegs[2]));
 
@@ -437,21 +855,71 @@ namespace Ryujinx.Cpu.Nce
             rsr.WritePrologue(asm);
 
             Operand lblFail = asm.CreateLabel();
+            Operand lblGenericHandler = asm.CreateLabel();
 
             WriteLoadContextSafe(asm, lblFail, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]), Gpr(scratchRegs[2]), Gpr(scratchRegs[3]));
 
+            // A tracked fault can also happen while the NCE host thread is in
+            // managed code. Waiting for InManaged to clear from that thread's
+            // signal handler deadlocks it. In that case the generic tracking
+            // handler is already on the correct host stack and can run directly.
+            asm.LdrRiUn(
+                Gpr(scratchRegs[1], OperandType.I32),
+                Gpr(scratchRegs[0]),
+                NceNativeContext.GetInManagedOffset());
+            asm.And(
+                Gpr(scratchRegs[1], OperandType.I32),
+                Gpr(scratchRegs[1], OperandType.I32),
+                Const(OperandType.I32, 1));
+            asm.Cbnz(Gpr(scratchRegs[1], OperandType.I32), lblGenericHandler);
+
+            if (OperatingSystem.IsLinux() || PlatformInfo.IsBionic)
+            {
+                WriteFaultExecutionStateSnapshot(
+                    asm,
+                    Gpr(scratchRegs[0]),
+                    Gpr(2),
+                    Gpr(scratchRegs[1]),
+                    LinuxUContextSpOffset,
+                    LinuxUContextPcOffset,
+                    LinuxUContextPstateOffset);
+            }
+            else if (OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+            {
+                asm.LdrRiUn(Gpr(scratchRegs[2]), Gpr(2), DarwinUContextMContextOffset);
+                WriteFaultExecutionStateSnapshot(
+                    asm,
+                    Gpr(scratchRegs[0]),
+                    Gpr(scratchRegs[2]),
+                    Gpr(scratchRegs[1]),
+                    DarwinMContextSpOffset,
+                    DarwinMContextPcOffset,
+                    -1);
+            }
+
+            WriteStoreGuestFpStateToContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]));
+            WriteLoadHostFpStateFromContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]));
+
+            // Keep the Linux fix: acquire before switching to HostSP so a
+            // pending suspend signal cannot nest on the host stack.
+            WriteInManagedLockAcquire(
+                asm,
+                Gpr(scratchRegs[0]),
+                Gpr(scratchRegs[1]),
+                Gpr(scratchRegs[3]));
             asm.LdrRiUn(Gpr(scratchRegs[1]), Gpr(scratchRegs[0]), NceNativeContext.GetHostSPOffset());
             asm.MovSp(Gpr(scratchRegs[2]), Gpr(Assembler.SpRegister));
             asm.MovSp(Gpr(Assembler.SpRegister), Gpr(scratchRegs[1]));
 
             // SigSegv
 
-            WriteInManagedLockAcquire(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]), Gpr(scratchRegs[3]));
 
             asm.Mov(Gpr(scratchRegs[3]), (ulong)signalHandlerPtr);
             asm.Blr(Gpr(scratchRegs[3]));
 
             WriteInManagedLockRelease(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]), Gpr(scratchRegs[3]), ThreadExitMethod.None);
+
+            WriteLoadGuestFpStateFromContext(asm, Gpr(scratchRegs[0]), Gpr(scratchRegs[1]));
 
             asm.MovSp(Gpr(Assembler.SpRegister), Gpr(scratchRegs[2]));
 
@@ -461,12 +929,52 @@ namespace Ryujinx.Cpu.Nce
 
             asm.MarkLabel(lblFail);
 
+            // Diagnostic: WriteLoadContextSafe reached lblFail.
+            // Stamp X28 in the Linux AArch64 ucontext.
+            if (OperatingSystem.IsLinux())
+            {
+                // Linux AArch64 ucontext: regs[0] starts at +184.
+                // X28 = 184 + (28 * 8) = 408.
+                asm.Add(Gpr(3), Gpr(2), Const(408UL));
+                asm.Mov(Gpr(4), 0x4E43454641494C31UL); // NCEFAIL1
+                asm.StrRiUn(Gpr(4), Gpr(3), 0);
+            }
+
+            asm.MarkLabel(lblGenericHandler);
+
             rsr.WriteEpilogue(asm);
 
-            asm.Mov(Gpr(3), (ulong)oldSignalHandlerSegfaultPtr);
+            // The generic handler performs tracked-region handling and already
+            // chains to the original host handler for unrelated faults.
+            asm.Mov(Gpr(3), (ulong)signalHandlerPtr);
             asm.Br(Gpr(3));
 
             return asm.GetCode();
+        }
+
+        private static void WriteFaultExecutionStateSnapshot(
+            Assembler asm,
+            Operand ctx,
+            Operand signalContext,
+            Operand tmp,
+            int spOffset,
+            int pcOffset,
+            int pstateOffset)
+        {
+            // NEOV2 NCE R3: tracked-memory faults are a normal hot path. Copying all 31
+            // guest registers on every handled SIGSEGV added work that no normal tracking
+            // callback consumes. Keep only the execution state used asynchronously.
+            asm.LdrRiUn(tmp, signalContext, spOffset);
+            asm.StrRiUn(tmp, ctx, NceNativeContext.GetGuestSPOffset());
+
+            asm.LdrRiUn(tmp, signalContext, pcOffset);
+            asm.StrRiUn(tmp, ctx, NceNativeContext.GetPcOffset());
+
+            if (pstateOffset >= 0)
+            {
+                asm.LdrRiUn(tmp, signalContext, pstateOffset);
+                asm.StrRiUn(Gpr(tmp.GetRegister().Index, OperandType.I32), ctx, NceNativeContext.GetPstateOffset());
+            }
         }
 
         private static void WriteInManagedLockAcquire(Assembler asm, Operand ctx, Operand tmp, Operand tmp2)

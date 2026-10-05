@@ -205,6 +205,9 @@ namespace Ryujinx.Graphics.Gpu
 
                 pt.Cache.Tick();
 
+                // NEOV2-GPUMEM1: Eden-style buffer collection and GPU memory statistics.
+                _context.TickGpuMemory();
+
                 texture.SynchronizeMemory();
 
                 ImageCrop crop = new(
@@ -242,6 +245,8 @@ namespace Ryujinx.Graphics.Gpu
 
                 pt.ReleaseCallback(pt.UserObj);
             }
+
+            _context.ProcessReady3DUploads();
         }
 
         /// <summary>

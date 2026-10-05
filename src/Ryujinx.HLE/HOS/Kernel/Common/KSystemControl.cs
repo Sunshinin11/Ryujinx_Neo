@@ -26,7 +26,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Common
             {
                 MemoryArrange.MemoryArrange4GiB or
                 MemoryArrange.MemoryArrange4GiBSystemDev or
-                MemoryArrange.MemoryArrange6GiBAppletDev => 3173 * MiB,
+                MemoryArrange.MemoryArrange6GiBAppletDev => 3285 * MiB,
                 MemoryArrange.MemoryArrange4GiBAppletDev => 2048 * MiB,
                 MemoryArrange.MemoryArrange6GiB => 4804 * MiB,
                 MemoryArrange.MemoryArrange8GiB => 6852 * MiB,

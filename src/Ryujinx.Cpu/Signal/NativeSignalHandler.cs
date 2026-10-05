@@ -62,6 +62,8 @@ namespace Ryujinx.Cpu.Signal
 
         private static readonly Lock _lock = new();
         private static bool _initialized;
+        private static bool _customUnixWrapperInstalled;
+        private static UnixSignalHandlerRegistration.SigAction _unixOriginalAction;
 
         static NativeSignalHandler()
         {
@@ -106,6 +108,7 @@ namespace Ryujinx.Cpu.Signal
 
                     UnixSignalHandlerRegistration.SigAction old = UnixSignalHandlerRegistration.RegisterExceptionHandler(_signalHandlerPtr);
 
+                    _unixOriginalAction = old;
                     config.UnixOldSigaction = (nuint)(ulong)old.sa_handler;
                     config.UnixOldSigaction3Arg = old.sa_flags & 4;
                 }
@@ -141,6 +144,55 @@ namespace Ryujinx.Cpu.Signal
         public static void InstallUnixSignalHandler(int sigNum, nint action)
         {
             UnixSignalHandlerRegistration.RegisterExceptionHandler(sigNum, action);
+        }
+
+        /// <summary>
+        /// Installs a wrapper around the already initialized Unix fault handler.
+        /// This also works when another CPU backend initialized the shared handler first.
+        /// </summary>
+        public static void InstallUnixSignalWrapper(Func<nint, nint, nint> customSignalHandlerFactory)
+            => InstallUnixSignalWrapper(customSignalHandlerFactory, null);
+
+        internal static void InstallUnixSignalWrapper(Func<nint, nint, nint> customSignalHandlerFactory,
+            Func<UnixSignalHandlerRegistration.SigAction, nint> previousActionFactory)
+        {
+            ArgumentNullException.ThrowIfNull(customSignalHandlerFactory);
+
+            InitializeSignalHandler();
+
+            lock (_lock)
+            {
+                if (_customUnixWrapperInstalled)
+                {
+                    return;
+                }
+
+                ref SignalHandlerConfig config = ref GetConfigRef();
+                nuint previousPointer = config.UnixOldSigaction;
+                int previousKind = config.UnixOldSigaction3Arg;
+                bool androidChain = PlatformInfo.IsBionic && previousActionFactory != null;
+                nint previous = androidChain ? previousActionFactory(_unixOriginalAction) : (nint)previousPointer;
+                nint wrapper = customSignalHandlerFactory(previous, _signalHandlerPtr);
+
+                if (androidChain)
+                {
+                    config.UnixOldSigaction = (nuint)previous;
+                    config.UnixOldSigaction3Arg = 4; // Generated dispatcher always takes the full signal frame.
+                }
+                try
+                {
+                    UnixSignalHandlerRegistration.RegisterExceptionHandler(wrapper, blockNceSuspend: androidChain,
+                        inheritedFlags: androidChain ? _unixOriginalAction.sa_flags : 0);
+                }
+                catch
+                {
+                    config.UnixOldSigaction = previousPointer;
+                    config.UnixOldSigaction3Arg = previousKind;
+                    throw;
+                }
+                _signalHandlerPtr = wrapper;
+                _customUnixWrapperInstalled = true;
+            }
         }
 
         private static nint MapCode(ReadOnlySpan<byte> code)

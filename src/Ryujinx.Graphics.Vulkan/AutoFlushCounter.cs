@@ -1,3 +1,4 @@
+﻿using Ryujinx.Common.Diagnostics;
 using Ryujinx.Common.Logging;
 using System;
 using System.Collections.Concurrent;
@@ -22,10 +23,14 @@ namespace Ryujinx.Graphics.Vulkan
         // Average wait time that triggers fast flush mode to be exited.
         private readonly static long _fastFlushExitThreshold = Stopwatch.Frequency / 10000; // (0.1ms)
 
+        // Turnip recovers from the NCE-driven fast-flush state sooner.
+        private readonly static long _turnipFastFlushExitThreshold = Stopwatch.Frequency * 3 / 4000; // (0.75ms)
+
         // Number of frames to average waiting times over.
         private const int SyncWaitAverageCount = 20;
 
         private const int MinDrawCountForFlush = 10;
+        private const int MaxDrawFlushesPerFrame = 4;
         private const int MinConsecutiveQueryForFlush = 10;
         private const int InitialQueryCountForFlush = 32;
 
@@ -45,6 +50,9 @@ namespace Ryujinx.Graphics.Vulkan
         private int _syncWaitHistoryIndex;
 
         private bool _fastFlushMode;
+        private int _drawFlushesThisFrame;
+        private int _drawFlushesSuppressed;
+        private readonly DrawFlushMode _drawFlushMode = NeoGraphicsSettings.DrawFlushMode;
 
         // NEOV2 Etapa 16: intervalos originais restaurados (a Etapa 15 piorou o TOTK).
         // Contadores de flush por motivo, registrados a cada 5 s. Flushes forcados por
@@ -66,6 +74,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         public static void RecordExternalFlush(string callerFile, string callerMember)
         {
+            if (!GezinjinxPerformanceMode.DetailedTelemetry) return;
+
             string file = string.IsNullOrEmpty(callerFile) ? "?" : Path.GetFileNameWithoutExtension(callerFile.Replace('\\', '/'));
             string key = file + "." + callerMember;
 
@@ -130,6 +140,29 @@ namespace Ryujinx.Graphics.Vulkan
         {
             if (_fastFlushMode)
             {
+                // NEOV2 NCE R3: a fast guest thread can otherwise turn a GPU wait into a
+                // feedback loop that flushes dozens of times per frame. Keep enough flushes
+                // to make progress without fragmenting every large draw sequence.
+                if (_drawFlushMode == DrawFlushMode.Disabled)
+                {
+                    _drawFlushesSuppressed++;
+                    return false;
+                }
+
+                if (_drawFlushMode == DrawFlushMode.Reduced)
+                {
+                    if (_drawFlushesThisFrame >= 1)
+                    {
+                        _drawFlushesSuppressed++;
+                        return false;
+                    }
+                }
+                else if (_gd.IsTurnip && _drawFlushesThisFrame >= MaxDrawFlushesPerFrame)
+                {
+                    _drawFlushesSuppressed++;
+                    return false;
+                }
+
                 long draws = (long)(drawCount - _lastDrawCount);
 
                 if (draws < MinDrawCountForFlush)
@@ -151,6 +184,7 @@ namespace Ryujinx.Graphics.Vulkan
                 if (flush)
                 {
                     _flushDraw++;
+                    _drawFlushesThisFrame++;
                 }
 
                 return flush;
@@ -200,6 +234,8 @@ namespace Ryujinx.Graphics.Vulkan
 
         public void Present()
         {
+            _drawFlushesThisFrame = 0;
+
             // Query flush prediction.
 
             _queryCountHistoryIndex = (_queryCountHistoryIndex + 1) % 3;
@@ -216,7 +252,9 @@ namespace Ryujinx.Graphics.Vulkan
 
             long averageWait = (long)_syncWaitHistory.Average();
 
-            if (_fastFlushMode ? averageWait < _fastFlushExitThreshold : averageWait > _fastFlushEnterThreshold)
+            long exitThreshold = _gd.IsTurnip ? _turnipFastFlushExitThreshold : _fastFlushExitThreshold;
+
+            if (_fastFlushMode ? averageWait < exitThreshold : averageWait > _fastFlushEnterThreshold)
             {
                 _fastFlushMode = !_fastFlushMode;
                 Logger.Debug?.PrintMsg(LogClass.Gpu, $"Switched fast flush mode: ({_fastFlushMode})");
@@ -231,7 +269,7 @@ namespace Ryujinx.Graphics.Vulkan
 
             long nowStats = Stopwatch.GetTimestamp();
 
-            if (nowStats - _statsStart >= _statsInterval)
+            if (GezinjinxPerformanceMode.DetailedTelemetry && nowStats - _statsStart >= _statsInterval)
             {
                 int other = Math.Max(0, _flushTotal - _flushAttachment - _flushDraw - _flushQuery);
 
@@ -246,12 +284,13 @@ namespace Ryujinx.Graphics.Vulkan
                 }
 
                 Logger.Info?.Print(LogClass.Gpu,
-                    $"[NEOV2-ETAPA16] flushes total={_flushTotal} attachment={_flushAttachment} draw={_flushDraw} query={_flushQuery} other={other} frames={_presents} fastFlushFrames={_fastFlushFrames} origins:{origins}");
+                    $"[NEOV2-ETAPA16] flushes total={_flushTotal} attachment={_flushAttachment} draw={_flushDraw} drawSuppressed={_drawFlushesSuppressed} query={_flushQuery} other={other} frames={_presents} fastFlushFrames={_fastFlushFrames} origins:{origins}");
 
                 _statsStart = nowStats;
                 _flushTotal = 0;
                 _flushAttachment = 0;
                 _flushDraw = 0;
+                _drawFlushesSuppressed = 0;
                 _flushQuery = 0;
                 _presents = 0;
                 _fastFlushFrames = 0;

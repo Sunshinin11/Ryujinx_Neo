@@ -1,6 +1,7 @@
 using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Configuration.Hid;
 using Ryujinx.Common.Configuration.Multiplayer;
+using Ryujinx.Common.Diagnostics;
 using Ryujinx.Common.Logging;
 using Ryujinx.Common.Utilities;
 using Ryujinx.HLE;
@@ -219,6 +220,16 @@ namespace Ryujinx.UI.Common.Configuration
         /// Enables or disables texture recompression
         /// </summary>
         public bool EnableTextureRecompression { get; set; }
+
+        /// <summary>
+        /// Global GPU command flush policy. Games may override this value.
+        /// </summary>
+        public DrawFlushMode DrawFlushMode { get; set; }
+
+        /// <summary>
+        /// Global GPU buffer readback policy. Games may override this value.
+        /// </summary>
+        public BufferReadbackMode BufferReadbackMode { get; set; }
 
         /// <summary>
         /// Enables or disables Macro high-level emulation

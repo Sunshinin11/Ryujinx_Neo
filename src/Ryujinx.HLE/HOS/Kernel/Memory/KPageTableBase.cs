@@ -235,7 +235,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
 
                 case ProcessCreationFlags.AddressSpace64Bit:
                     ulong reservedAddressSpaceSize = _reservedAddressSpaceSize;
-                    if (_reservedAddressSpaceSize < addrSpaceEnd)
+                    if (_reservedAddressSpaceSize <= addrSpaceEnd)
                     {
                         int addressSpaceWidth = (int)ulong.Log2(reservedAddressSpaceSize);
 
@@ -256,46 +256,32 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
                         addrSpaceEnd = reservedSize + reservedAddressSpaceSize;
                         AslrRegionEnd = addrSpaceEnd;
 
-                        // NEOV2 ALIAS1: the rule above drops the alias region from 64 GiB (console size) to 1/8 of the
-                        // reserved width when the host reserve is below 96 GiB (88 GiB gives an 8 GiB alias). .NET NativeAOT
-                        // games such as MARVEL Cosmic Invasion reserve large ranges there and abort at startup with 8 GiB.
-                        // Keep the console size whenever everything still fits in the reserved address space.
-                        if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled && aliasRegion.Size < 0x1000000000)
+                        // NEOV2 ALIAS1: preserva o tamanho de alias do console
+                        // quando ele ainda cabe no address space reservado.
+                        if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled &&
+                            aliasRegion.Size < 0x1000000000)
                         {
                             ulong codeEnd = CodeRegionStart + codeRegionSize;
-                            ulong spaceBefore = CodeRegionStart > AslrRegionStart ? CodeRegionStart - AslrRegionStart : 0;
-                            ulong spaceAfter = addrSpaceEnd > codeEnd ? addrSpaceEnd - codeEnd : 0;
+                            ulong spaceBefore = CodeRegionStart > AslrRegionStart
+                                ? CodeRegionStart - AslrRegionStart
+                                : 0;
+                            ulong spaceAfter = addrSpaceEnd > codeEnd
+                                ? addrSpaceEnd - codeEnd
+                                : 0;
                             ulong available = Math.Max(spaceBefore, spaceAfter);
-                            ulong extraSize = flags.HasFlag(ProcessCreationFlags.EnableAliasRegionExtraSize) ? addrSpaceEnd / 8 : 0;
-                            ulong needed = 0x1000000000UL + extraSize + heapRegion.Size + stackRegion.Size + tlsIoRegion.Size;
+                            ulong extraSize = flags.HasFlag(ProcessCreationFlags.EnableAliasRegionExtraSize)
+                                ? addrSpaceEnd / 8
+                                : 0;
+                            ulong needed = 0x1000000000UL +
+                                extraSize +
+                                heapRegion.Size +
+                                stackRegion.Size +
+                                tlsIoRegion.Size;
+
                             if (needed <= available)
                             {
                                 aliasRegion.Size = 0x1000000000;
                             }
-                        }
-
-                        // NEOV2-STACK1: the rule above also shrinks the stack region to 1/256 of the reserved width
-                        // (256 MiB for the 120 GiB Android reserve), while the console (and Eden) use 2 GiB for 39-bit
-                        // processes. nn::os maps every thread stack into this region with svcMapMemory, so games that
-                        // create many threads (GRID Autosport) run out of room and abort inside nn::os::CreateThread.
-                        // Keep the console size whenever everything still fits in the reserved address space.
-                        if (stackRegion.Size < 0x80000000)
-                        {
-                            ulong codeEnd = CodeRegionStart + codeRegionSize;
-                            ulong spaceBefore = CodeRegionStart > AslrRegionStart ? CodeRegionStart - AslrRegionStart : 0;
-                            ulong spaceAfter = addrSpaceEnd > codeEnd ? addrSpaceEnd - codeEnd : 0;
-                            ulong available = Math.Max(spaceBefore, spaceAfter);
-                            ulong extraSize = flags.HasFlag(ProcessCreationFlags.EnableAliasRegionExtraSize) ? addrSpaceEnd / 8 : 0;
-                            ulong needed = aliasRegion.Size + extraSize + heapRegion.Size + 0x80000000UL + tlsIoRegion.Size;
-                            ulong previousStackSize = stackRegion.Size;
-
-                            if (needed <= available)
-                            {
-                                stackRegion.Size = 0x80000000;
-                            }
-
-                            Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Kernel,
-                                $"[NEOV2-STACK1] Stack region 0x{previousStackSize:X} -> 0x{stackRegion.Size:X} (alias=0x{aliasRegion.Size:X} heap=0x{heapRegion.Size:X} tlsIo=0x{tlsIoRegion.Size:X} needed=0x{needed:X} available=0x{available:X})");
                         }
                     }
                     else
@@ -662,35 +648,11 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
             }
         }
 
-        // An emulator-owned NCE island keeps its physical page list for exact release.
-        // Resource-limit accounting belongs to the process-specific caller.
-        internal Result MapNceCodePatch(ulong address, ulong size, out KPageList pages)
-        {
-            pages = null;
-            if (size == 0 || ((address | size) & (PageSize - 1)) != 0 ||
-                !CanContain(address, size, MemoryState.CodeStatic))
-                return KernelResult.InvalidMemState;
-
-            Result result = AllocatePagesReclaiming(GetMemoryRegionManager(), out KPageList allocated, size / PageSize);
-            if (result != Result.Success) return result;
-            try
-            {
-                result = MapPages(address, allocated, MemoryState.CodeStatic, KMemoryPermission.None);
-                if (result == Result.Success) pages = allocated;
-                return result;
-            }
-            finally
-            {
-                // A successful MapPages owns its own reference; failure retains none.
-                allocated.DecrementPagesReferenceCount(Context.MemoryManager);
-            }
-        }
-
         private Result AllocateAndMapPages(ulong address, ulong pagesCount, KMemoryPermission permission)
         {
             KMemoryRegionManager region = GetMemoryRegionManager();
 
-            Result result = AllocatePagesReclaiming(region, out KPageList pageList, pagesCount);
+            Result result = region.AllocatePages(out KPageList pageList, pagesCount);
 
             if (result != Result.Success)
             {
@@ -847,7 +809,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
 
                     KMemoryRegionManager region = GetMemoryRegionManager();
 
-                    Result result = AllocatePagesReclaiming(region, out KPageList pageList, pagesCount);
+                    Result result = region.AllocatePages(out KPageList pageList, pagesCount);
 
                     using OnScopeExit _ = new(() => pageList.DecrementPagesReferenceCount(Context.MemoryManager));
 
@@ -1417,33 +1379,6 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
                     return KernelResult.ResLimitExceeded;
                 }
 
-                if (UsePhysicalWindows)
-                {
-                    // NEOV2 NCE-PHYSWIN1: see MapPhysicalMemoryWindowed.
-                    Result windowed = MapPhysicalMemoryWindowed(address, endAddr);
-
-                    if (windowed != Result.Success)
-                    {
-                        currentProcess.ResourceLimit?.Release(LimitableResource.Memory, remainingSize);
-
-                        return windowed;
-                    }
-
-                    PhysicalMemoryUsage += remainingSize;
-
-                    _blockManager.InsertBlock(
-                        address,
-                        size / PageSize,
-                        MemoryState.Unmapped,
-                        KMemoryPermission.None,
-                        MemoryAttribute.None,
-                        MemoryState.Heap,
-                        KMemoryPermission.ReadAndWrite,
-                        MemoryAttribute.None);
-
-                    return Result.Success;
-                }
-
                 KMemoryRegionManager region = GetMemoryRegionManager();
 
                 Result result = region.AllocatePages(out KPageList pageList, remainingPages);
@@ -1531,333 +1466,6 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
                     MemoryState.Heap,
                     KMemoryPermission.ReadAndWrite,
                     MemoryAttribute.None);
-            }
-
-            return Result.Success;
-        }
-
-        // NEOV2 NCE-PHYSWIN1: physical placement for svcMapPhysicalMemory on NCE (Android).
-        //
-        // Every guest Map becomes a host MAP_FIXED view of the backing memory. The host kernel can only
-        // merge two views into one VMA when both the guest VA and the backing offset (guest PA) are
-        // contiguous. UE4 titles (e.g. Dragon Quest, 0100A9D01C446000) call svcMapPhysicalMemory ~60k
-        // times in small pieces from several pools at once, so the plain page allocator hands out
-        // interleaved PAs: each piece became its own VMA and the process hit vm.max_map_count (65530).
-        //
-        // Here each 512 KiB guest VA window gets one physically contiguous 512 KiB block, and page N of
-        // the window always uses page N of that block. Pieces mapped later in the same window are then
-        // contiguous in VA and PA and merge on the host (memfd backing). Pages of a block that are not
-        // mapped yet stay reserved. Above the cap, the least recently used windows give back their free
-        // pages; if an allocation would fail, every window gives them back.
-        public static bool NcePhysicalWindowsEnabled { get; set; } = true;
-
-        protected virtual bool UsePhysicalWindows => false;
-
-        // R15 log (DQ): 2 MiB windows were only ~40% used before the cap hit, so 512 KiB keeps less stranded.
-        private const ulong PhysWindowSize = 0x80000;
-        private const int PhysWindowPages = (int)(PhysWindowSize / PageSize);
-        private const ulong PhysWindowReservedLimitPages = (256UL << 20) / PageSize;
-        private const ulong PhysWindowReservedTargetPages = PhysWindowReservedLimitPages / 2;
-
-        private sealed class PhysWindow
-        {
-            public readonly ulong Pa;
-            private readonly ulong[] _claimed = new ulong[PhysWindowPages / 64];
-            public int FreeCount = PhysWindowPages;
-            public long LastUse;
-
-            public PhysWindow(ulong pa)
-            {
-                Pa = pa;
-            }
-
-            public bool IsFree(int index) => (_claimed[index >> 6] & (1UL << (index & 63))) == 0;
-
-            public bool TryClaim(int index)
-            {
-                ulong bit = 1UL << (index & 63);
-
-                if ((_claimed[index >> 6] & bit) != 0)
-                {
-                    return false;
-                }
-
-                _claimed[index >> 6] |= bit;
-                FreeCount--;
-
-                return true;
-            }
-        }
-
-        private readonly object _physWindowLock = new();
-        private Dictionary<ulong, PhysWindow> _physWindows;
-        // The page heap only hands out contiguous blocks of 4 KiB, 64 KiB or 2 MiB: a 2 MiB block is split
-        // into 512 KiB window slots, and the slots not given to a window yet wait here (still reserved).
-        private const int PhysWindowsPerChunk = (int)(0x200000 / PhysWindowSize);
-        private readonly Stack<ulong> _physWindowSpareSlots = new();
-        private ulong _physWindowReservedPages;
-        private long _physWindowTick;
-
-        private Result AllocatePagesReclaiming(KMemoryRegionManager region, out KPageList pageList, ulong pagesCount)
-        {
-            Result result = region.AllocatePages(out pageList, pagesCount);
-
-            if (result != Result.Success && ReclaimPhysWindows(all: true))
-            {
-                result = region.AllocatePages(out pageList, pagesCount);
-            }
-
-            return result;
-        }
-
-        /// <summary>
-        /// Releases reserved-but-unmapped pages of the physical windows. With <paramref name="all"/> every window
-        /// is released; otherwise the least recently used ones, until the reserve is back to the target.
-        /// Released windows are forgotten, so a later map in that VA range starts a fresh window.
-        /// Returns true if any page was released.
-        /// </summary>
-        private bool ReclaimPhysWindows(bool all)
-        {
-            lock (_physWindowLock)
-            {
-                if (_physWindows == null || (_physWindows.Count == 0 && _physWindowSpareSlots.Count == 0))
-                {
-                    return false;
-                }
-
-                ulong released = 0;
-
-                while (_physWindowSpareSlots.Count != 0 && (all || _physWindowReservedPages > PhysWindowReservedTargetPages))
-                {
-                    Context.MemoryManager.DecrementPagesReferenceCount(_physWindowSpareSlots.Pop(), (ulong)PhysWindowPages);
-                    released += (ulong)PhysWindowPages;
-                    _physWindowReservedPages -= (ulong)PhysWindowPages;
-                }
-
-                List<KeyValuePair<ulong, PhysWindow>> victims = new(_physWindows);
-
-                if (!all)
-                {
-                    victims.Sort(static (a, b) => a.Value.LastUse.CompareTo(b.Value.LastUse));
-                }
-
-                foreach (KeyValuePair<ulong, PhysWindow> entry in victims)
-                {
-                    if (!all && _physWindowReservedPages <= PhysWindowReservedTargetPages)
-                    {
-                        break;
-                    }
-
-                    PhysWindow window = entry.Value;
-                    int index = 0;
-
-                    while (index < PhysWindowPages)
-                    {
-                        if (!window.IsFree(index))
-                        {
-                            index++;
-                            continue;
-                        }
-
-                        int start = index;
-
-                        while (index < PhysWindowPages && window.TryClaim(index))
-                        {
-                            index++;
-                        }
-
-                        ulong count = (ulong)(index - start);
-                        Context.MemoryManager.DecrementPagesReferenceCount(window.Pa + (ulong)start * PageSize, count);
-                        released += count;
-                        _physWindowReservedPages -= count;
-                    }
-
-                    _physWindows.Remove(entry.Key);
-                }
-
-
-
-                return released != 0;
-            }
-        }
-
-        private PhysWindow GetOrCreatePhysWindow(ulong windowVa)
-        {
-            if (_physWindows.TryGetValue(windowVa, out PhysWindow window))
-            {
-                window.LastUse = ++_physWindowTick;
-
-                return window;
-            }
-
-            if (_physWindowReservedPages + PhysWindowPages > PhysWindowReservedLimitPages)
-            {
-                ReclaimPhysWindows(all: false);
-            }
-
-            if (_physWindowSpareSlots.Count == 0)
-            {
-                const ulong ChunkPages = (ulong)PhysWindowPages * PhysWindowsPerChunk;
-
-                KMemoryRegionManager region = GetMemoryRegionManager();
-                ulong chunk = region.AllocatePagesContiguous(Context, ChunkPages, false);
-
-                if (chunk == 0 && ReclaimPhysWindows(all: true))
-                {
-                    chunk = region.AllocatePagesContiguous(Context, ChunkPages, false);
-                }
-
-                if (chunk == 0)
-                {
-                    return null;
-                }
-
-                for (int slot = PhysWindowsPerChunk - 1; slot >= 0; slot--)
-                {
-                    _physWindowSpareSlots.Push(chunk + (ulong)slot * PhysWindowSize);
-                }
-
-                _physWindowReservedPages += ChunkPages;
-            }
-
-            window = new PhysWindow(_physWindowSpareSlots.Pop()) { LastUse = ++_physWindowTick };
-            _physWindows[windowVa] = window;
-
-            return window;
-        }
-
-        // Caller holds _blockManager, has reserved the resource limit and checked that something is unmapped.
-        private Result MapPhysicalMemoryWindowed(ulong address, ulong endAddr)
-        {
-            if (!_slabManager.CanAllocate(MaxBlocksNeededForInsertion))
-            {
-                return KernelResult.OutOfResource;
-            }
-
-            // Pa == 0 marks a run that must come from the regular page allocator.
-            List<(ulong Va, ulong Pages, ulong Pa)> segments = new();
-            ulong fallbackPages = 0;
-
-            lock (_physWindowLock)
-            {
-                _physWindows ??= new Dictionary<ulong, PhysWindow>();
-
-                foreach (KMemoryInfo info in IterateOverRange(address, endAddr))
-                {
-                    if (info.State != MemoryState.Unmapped)
-                    {
-                        continue;
-                    }
-
-                    ulong va = GetAddrInRange(info, address);
-                    ulong end = va + GetSizeInRange(info, address, endAddr);
-
-                    while (va < end)
-                    {
-                        ulong windowVa = BitUtils.AlignDown(va, PhysWindowSize);
-                        ulong chunkEnd = Math.Min(end, windowVa + PhysWindowSize);
-                        PhysWindow window = GetOrCreatePhysWindow(windowVa);
-
-                        while (va < chunkEnd)
-                        {
-                            ulong runStart = va;
-                            bool fromWindow = window != null && window.TryClaim((int)((va - windowVa) / PageSize));
-
-                            va += PageSize;
-
-                            while (va < chunkEnd)
-                            {
-                                int index = (int)((va - windowVa) / PageSize);
-
-                                if (fromWindow ? !window.TryClaim(index) : (window != null && window.IsFree(index)))
-                                {
-                                    break;
-                                }
-
-                                va += PageSize;
-                            }
-
-                            ulong pages = (va - runStart) / PageSize;
-
-                            if (fromWindow)
-                            {
-                                segments.Add((runStart, pages, window.Pa + (runStart - windowVa)));
-                                _physWindowReservedPages -= pages;
-                            }
-                            else
-                            {
-                                segments.Add((runStart, pages, 0));
-                                fallbackPages += pages;
-                            }
-                        }
-                    }
-                }
-            }
-
-            KPageList pageList = null;
-
-            if (fallbackPages != 0)
-            {
-                Result result = AllocatePagesReclaiming(GetMemoryRegionManager(), out pageList, fallbackPages);
-
-                if (result != Result.Success)
-                {
-                    // Claimed window pages are owned by this call now: give them back to the heap.
-                    foreach (var (_, pages, pa) in segments)
-                    {
-                        if (pa != 0)
-                        {
-                            Context.MemoryManager.DecrementPagesReferenceCount(pa, pages);
-                        }
-                    }
-
-                    return result;
-                }
-            }
-
-            try
-            {
-                LinkedListNode<KPageNode> node = pageList?.Nodes.First;
-                ulong srcPa = node?.Value.Address ?? 0;
-                ulong srcPages = node?.Value.PagesCount ?? 0;
-
-                foreach (var (segmentVa, segmentPages, segmentPa) in segments)
-                {
-                    if (segmentPa != 0)
-                    {
-                        // MapPages takes its own reference; drop the one the window reservation held.
-                        MapPages(segmentVa, segmentPages, segmentPa, KMemoryPermission.ReadAndWrite, MemoryMapFlags.Private);
-                        Context.MemoryManager.DecrementPagesReferenceCount(segmentPa, segmentPages);
-
-                        continue;
-                    }
-
-                    ulong dstVa = segmentVa;
-                    ulong left = segmentPages;
-
-                    while (left > 0)
-                    {
-                        if (srcPages == 0)
-                        {
-                            node = node.Next;
-                            srcPa = node.Value.Address;
-                            srcPages = node.Value.PagesCount;
-                        }
-
-                        ulong count = Math.Min(srcPages, left);
-
-                        MapPages(dstVa, count, srcPa, KMemoryPermission.ReadAndWrite, MemoryMapFlags.Private);
-
-                        dstVa += count * PageSize;
-                        srcPa += count * PageSize;
-                        srcPages -= count;
-                        left -= count;
-                    }
-                }
-            }
-            finally
-            {
-                pageList?.DecrementPagesReferenceCount(Context.MemoryManager);
             }
 
             return Result.Success;

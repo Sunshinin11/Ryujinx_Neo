@@ -12,12 +12,6 @@ using static Ryujinx.Graphics.Nvdec.MemoryExtensions;
 
 namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
 {
-    /// <summary>
-    /// NEOV2-VP9EDEN1: decodificacao VP9 pelo FFmpeg, no mesmo esquema do Eden.
-    /// O quadro N e decodificado quando o quadro N+1 chega (fila de 1 quadro) e a imagem vai para a
-    /// superficie de saida do quadro N+1. O video fica 1 quadro atrasado, como no Eden.
-    /// So comeca num quadro-chave; em qualquer falha volta ao decodificador em C# ate o proximo quadro-chave.
-    /// </summary>
     internal sealed class Vp9FFmpegPath : IDisposable
     {
         private FFmpeg.Vp9.Decoder _decoder;
@@ -28,45 +22,62 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
         private bool _active;
         private bool _unavailable;
 
-        public bool TryDecode(ResourceManager rm, ref NvdecRegisters state, in PictureInfo pictureInfo)
+        public bool TryDecode(
+            ResourceManager rm,
+            ref NvdecRegisters state,
+            in PictureInfo pictureInfo)
         {
-            bool isKeyFrame = pictureInfo.Flags.HasFlag(FrameFlags.IsKeyFrame);
+            bool isKeyFrame =
+                pictureInfo.Flags.HasFlag(FrameFlags.IsKeyFrame);
 
             if (!_active)
             {
-                if (_unavailable || !isKeyFrame || !Start())
+                if (_unavailable ||
+                    !isKeyFrame ||
+                    !Start())
                 {
                     return false;
                 }
             }
 
-            if (pictureInfo.BitDepth != 0 && pictureInfo.BitDepth != 8)
+            if (pictureInfo.BitDepth != 0 &&
+                pictureInfo.BitDepth != 8)
             {
-                Stop($"profundidade de cor nao suportada ({pictureInfo.BitDepth})");
+                Stop(
+                    $"profundidade de cor nao suportada ({pictureInfo.BitDepth})");
 
                 return false;
             }
 
             try
             {
-                return DecodeCore(rm, ref state, in pictureInfo);
+                return DecodeCore(
+                    rm,
+                    ref state,
+                    in pictureInfo);
             }
             catch (Exception ex)
             {
                 Stop($"{ex.GetType().Name}: {ex.Message}");
-
                 return false;
             }
         }
 
-        private bool DecodeCore(ResourceManager rm, ref NvdecRegisters state, in PictureInfo pictureInfo)
+        private bool DecodeCore(
+            ResourceManager rm,
+            ref NvdecRegisters state,
+            in PictureInfo pictureInfo)
         {
-            EntropyProbs entropy = rm.MemoryManager.DeviceRead<EntropyProbs>(state.Vp9SetProbTabBufOffset);
+            EntropyProbs entropy =
+                rm.MemoryManager.DeviceRead<EntropyProbs>(
+                    state.Vp9SetProbTabBufOffset);
 
             Vp9FrameContainer incoming = new()
             {
                 Picture = pictureInfo,
-                Bitstream = rm.MemoryManager.DeviceGetSpan(state.SetInBufBaseOffset, (int)pictureInfo.BitstreamSize).ToArray(),
+                Bitstream = rm.MemoryManager.DeviceGetSpan(
+                    state.SetInBufBaseOffset,
+                    (int)pictureInfo.BitstreamSize).ToArray(),
                 ShowFrame = true,
             };
 
@@ -74,17 +85,25 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
 
             for (int i = 0; i < 4; i++)
             {
-                incoming.Offsets[i] = state.SetPictureLumaOffset[i];
+                incoming.Offsets[i] =
+                    state.SetPictureLumaOffset[i];
             }
 
-            byte[] packet = _composer.ComposeFrame(in incoming, out _, out _);
+            byte[] packet =
+                _composer.ComposeFrame(
+                    in incoming,
+                    out _,
+                    out _);
 
-            int result = _decoder.Decode(_decodeSurface, packet, out bool gotFrame);
+            int result =
+                _decoder.Decode(
+                    _decodeSurface,
+                    packet,
+                    out bool gotFrame);
 
             if (result < 0)
             {
                 Stop($"FFmpeg retornou {result}");
-
                 return false;
             }
 
@@ -92,13 +111,14 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
 
             if (gotFrame)
             {
-                (_decodeSurface, _lastSurface) = (_lastSurface, _decodeSurface);
+                (_decodeSurface, _lastSurface) =
+                    (_lastSurface, _decodeSurface);
+
                 _hasLastFrame = true;
                 output = _lastSurface;
             }
             else if (_hasLastFrame)
             {
-                // Quadro oculto: repete o ultimo quadro exibido em vez de deixar a superficie antiga.
                 output = _lastSurface;
             }
 
@@ -106,22 +126,40 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                 output.Width == pictureInfo.CurrentFrameSize.Width &&
                 output.Height == pictureInfo.CurrentFrameSize.Height)
             {
-                SurfaceWriter.Write(rm.MemoryManager, output, state.SetPictureLumaOffset[3], state.SetPictureChromaOffset[3]);
+                SurfaceWriter.Write(
+                    rm.MemoryManager,
+                    output,
+                    state.SetPictureLumaOffset[3],
+                    state.SetPictureChromaOffset[3]);
             }
 
-            // O FFmpeg guarda referencias e probabilidades internamente. As regioes de retorno do NVDEC
-            // recebem valores neutros: vetores zerados e contadores zerados (o jogo nao adapta as probabilidades).
-            int miCols = BitUtils.DivRoundUp(pictureInfo.CurrentFrameSize.Width, 8);
-            int miRows = BitUtils.DivRoundUp(pictureInfo.CurrentFrameSize.Height, 8);
+            int miCols =
+                BitUtils.DivRoundUp(
+                    pictureInfo.CurrentFrameSize.Width,
+                    8);
 
-            using (WritableRegion mvsRegion = rm.MemoryManager.GetWritableRegion(ExtendOffset(state.Vp9SetColMvWriteBufOffset), miRows * miCols * 16))
+            int miRows =
+                BitUtils.DivRoundUp(
+                    pictureInfo.CurrentFrameSize.Height,
+                    8);
+
+            using (WritableRegion mvsRegion =
+                rm.MemoryManager.GetWritableRegion(
+                    ExtendOffset(
+                        state.Vp9SetColMvWriteBufOffset),
+                    miRows * miCols * 16))
             {
                 mvsRegion.Memory.Span.Clear();
             }
 
-            using (WritableRegion countsRegion = rm.MemoryManager.GetWritableRegion(ExtendOffset(state.Vp9SetCtxCounterBufOffset), Unsafe.SizeOf<BackwardUpdates>()))
+            using (WritableRegion countsRegion =
+                rm.MemoryManager.GetWritableRegion(
+                    ExtendOffset(
+                        state.Vp9SetCtxCounterBufOffset),
+                    Unsafe.SizeOf<BackwardUpdates>()))
             {
-                MemoryMarshal.Cast<byte, BackwardUpdates>(countsRegion.Memory.Span)[0] = default;
+                MemoryMarshal.Cast<byte, BackwardUpdates>(
+                    countsRegion.Memory.Span)[0] = default;
             }
 
             return true;
@@ -136,7 +174,10 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                 if (!_decoder.IsReady)
                 {
                     _unavailable = true;
-                    Logger.Warning?.Print(LogClass.Nvdec, "FFmpeg VP9 indisponivel; usando o decodificador em C#.");
+
+                    Logger.Warning?.Print(
+                        LogClass.Nvdec,
+                        "FFmpeg VP9 indisponivel; usando o decodificador em C#.");
 
                     return false;
                 }
@@ -144,8 +185,12 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                 _composer ??= new Vp9HeaderComposer();
                 _composer.Reset();
 
-                _decodeSurface ??= _decoder.CreateSurface(0, 0);
-                _lastSurface ??= _decoder.CreateSurface(0, 0);
+                _decodeSurface ??=
+                    _decoder.CreateSurface(0, 0);
+
+                _lastSurface ??=
+                    _decoder.CreateSurface(0, 0);
+
                 _hasLastFrame = false;
                 _active = true;
 
@@ -154,7 +199,10 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
             catch (Exception ex)
             {
                 _unavailable = true;
-                Logger.Warning?.Print(LogClass.Nvdec, $"Falha ao iniciar o FFmpeg VP9 ({ex.GetType().Name}: {ex.Message}); usando o decodificador em C#.");
+
+                Logger.Warning?.Print(
+                    LogClass.Nvdec,
+                    $"Falha ao iniciar o FFmpeg VP9 ({ex.GetType().Name}: {ex.Message}); usando o decodificador em C#.");
 
                 return false;
             }
@@ -166,23 +214,28 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
             _hasLastFrame = false;
             _composer?.Reset();
 
-            // Recria o decodificador no proximo quadro-chave para comecar sem estado antigo.
             _decodeSurface?.Dispose();
             _decodeSurface = null;
+
             _lastSurface?.Dispose();
             _lastSurface = null;
+
             _decoder?.Dispose();
             _decoder = null;
 
-            Logger.Warning?.Print(LogClass.Nvdec, $"Voltando ao decodificador em C# ate o proximo quadro-chave: {reason}");
+            Logger.Warning?.Print(
+                LogClass.Nvdec,
+                $"Voltando ao decodificador em C# ate o proximo quadro-chave: {reason}");
         }
 
         public void Dispose()
         {
             _decodeSurface?.Dispose();
             _decodeSurface = null;
+
             _lastSurface?.Dispose();
             _lastSurface = null;
+
             _decoder?.Dispose();
             _decoder = null;
         }

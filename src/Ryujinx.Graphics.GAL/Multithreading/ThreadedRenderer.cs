@@ -25,7 +25,6 @@ namespace Ryujinx.Graphics.GAL.Multithreading
         private const int MaxRefsPerCommand = 2;
         private const int QueueCount = 10000;
         private const int ConsumerBatchSize = 64;
-        private readonly bool _hugareOptimizations = Ryujinx.Common.Diagnostics.NeoGraphicsSettings.HugareOptimizationsEnabled;
 
         private readonly int _elementSize;
         private readonly IRenderer _baseRenderer;
@@ -47,12 +46,9 @@ namespace Ryujinx.Graphics.GAL.Multithreading
         private int _producerWaiting;
 
         // NEOV2 QUEUE-HYST1: com a fila cheia, o produtor so volta quando houver este numero de
-        // posicoes livres, e o consumidor sinaliza uma unica vez por espera. Antes, o consumidor
-        // chamava Set() a cada comando e as duas threads se alternavam comando a comando.
-        // Mesmo principio do Eden (Scheduler::DispatchWork), que acorda o worker uma vez por bloco.
+        // posicoes livres, e o consumidor sinaliza uma unica vez por espera.
         private const int QueueResumeFreeSlots = QueueCount / 4;
 
-        // Opcao "Otimizacoes de GPU": desligada, a fila volta ao comportamento anterior ao QUEUE-HYST1.
         private readonly bool _queueHysteresis = Ryujinx.Common.Diagnostics.NeoGraphicsSettings.QueueHysteresisEnabled;
 
         private bool _lastSampleCounterClear = true;
@@ -62,6 +58,15 @@ namespace Ryujinx.Graphics.GAL.Multithreading
 
         private int _consumerPtr;
         private int _commandCount;
+
+        private long _queueTelemetryWraps;
+        private long _queueFullEpisodes;
+        private long _consumerWaits;
+        private long _consumerEmptyDrains;
+        private long _invokeWaits;
+        private int _queueMaxDepth;
+        private readonly long[] _commandHistogram = new long[256];
+        private long _commandsConsumed;
 
         private int _producerPtr;
         private int _lastProducedPtr;
@@ -87,7 +92,6 @@ namespace Ryujinx.Graphics.GAL.Multithreading
 
         public IRenderer BaseRenderer => _baseRenderer;
 
-        // NEOV2 CONDRENDER1: constant device property, safe to read from the GPU thread.
         public bool PreferUnconditionalRenderingOverReadback => _baseRenderer.PreferUnconditionalRenderingOverReadback;
 
         public bool PreferThreading => _baseRenderer.PreferThreading;
@@ -126,7 +130,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading
 
             _gpuThread = new Thread(() =>
             {
-                if (_hugareOptimizations) BackendThreadAffinity.PinCurrentThreadToGpuCores();
+                BackendThreadAffinity.PinCurrentThreadToGpuCores();
                 gpuLoop();
             })
             {
@@ -137,24 +141,18 @@ namespace Ryujinx.Graphics.GAL.Multithreading
 
             // NEOV2 GPU-AFFINITY2: keep the backend away from a unique prime core
             // reserved for GPU.MainThread.
-            if (_hugareOptimizations) BackendThreadAffinity.PinCurrentThreadToBackendCores();
-            else BackendThreadAffinity.PinCurrentThreadToFastestCores();
+            BackendThreadAffinity.PinCurrentThreadToBackendCores();
 
             RenderLoop();
         }
 
         public void RenderLoop()
         {
-            if (!_hugareOptimizations)
-            {
-                RenderLoopLegacy();
-                return;
-            }
-
             // Power through the render queue until the Gpu thread work is done.
 
             while (_running)
             {
+                _consumerWaits++;
                 _galWorkAvailable.Wait();
                 _galWorkAvailable.Reset();
 
@@ -181,6 +179,15 @@ namespace Ryujinx.Graphics.GAL.Multithreading
                     while (processed < available && Volatile.Read(ref _interruptAction) == null)
                     {
                         Span<byte> command = new(_commandQueue, commandPtr * _elementSize, _elementSize);
+
+                        CommandType commandType = (CommandType)command[^1];
+                        _commandHistogram[(byte)commandType]++;
+                        long commandsConsumed = ++_commandsConsumed;
+
+                        if (commandsConsumed % 1000000 == 0)
+                        {
+                            LogCommandHistogram(commandsConsumed);
+                        }
 
                         // Run the command.
 
@@ -209,6 +216,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading
                     Volatile.Write(ref _consumerPtr, commandPtr);
                     int remaining = Interlocked.Add(ref _commandCount, -processed);
 
+                    if (remaining == 0)
+                    {
+                        _consumerEmptyDrains++;
+                    }
+
                     if (_queueHysteresis)
                     {
                         if (Volatile.Read(ref _producerWaiting) != 0 &&
@@ -226,64 +238,43 @@ namespace Ryujinx.Graphics.GAL.Multithreading
             }
         }
 
-        private void RenderLoopLegacy()
+        private void LogCommandHistogram(long total)
         {
-            // Power through the render queue until the Gpu thread work is done.
+            Span<int> topIndices = stackalloc int[12];
+            Span<long> topCounts = stackalloc long[12];
+            topIndices.Fill(-1);
 
-            while (_running)
+            for (int index = 0; index < _commandHistogram.Length; index++)
             {
-                _galWorkAvailable.Wait();
-                _galWorkAvailable.Reset();
+                long count = _commandHistogram[index];
 
-                if (Volatile.Read(ref _interruptAction) != null)
+                for (int position = 0; position < topCounts.Length; position++)
                 {
-                    _interruptAction?.Invoke();
-                    _interruptRun.Set();
-
-                    Interlocked.Exchange(ref _interruptAction, null);
-                }
-
-                // The other thread can only increase the command count.
-                // We can assume that if it is above 0, it will stay there or get higher.
-
-                while (Volatile.Read(ref _commandCount) > 0 && Volatile.Read(ref _interruptAction) == null)
-                {
-                    int commandPtr = _consumerPtr;
-
-                    Span<byte> command = new(_commandQueue, commandPtr * _elementSize, _elementSize);
-
-                    // Run the command.
-
-                    CommandHelper.RunCommand(command, this, _baseRenderer);
-
-                    if (Interlocked.CompareExchange(ref _invokePtr, -1, commandPtr) == commandPtr)
+                    if (count > topCounts[position])
                     {
-                        _invokeRun.Set();
-                    }
-
-                    _consumerPtr = (_consumerPtr + 1) % QueueCount;
-
-                    // Interlocked.Decrement e uma barreira completa: a escrita de _consumerPtr
-                    // fica visivel antes da leitura de _producerWaiting.
-                    Interlocked.Decrement(ref _commandCount);
-
-                    if (_queueHysteresis)
-                    {
-                        // NEOV2 QUEUE-HYST1: sinaliza so quando ha espaco suficiente, e uma vez por espera.
-                        if (Volatile.Read(ref _producerWaiting) != 0 &&
-                            QueueCount - 1 - Volatile.Read(ref _commandCount) >= QueueResumeFreeSlots &&
-                            Interlocked.Exchange(ref _producerWaiting, 0) != 0)
+                        for (int shift = topCounts.Length - 1; shift > position; shift--)
                         {
-                            _queueSpaceAvailable.Set();
+                            topCounts[shift] = topCounts[shift - 1];
+                            topIndices[shift] = topIndices[shift - 1];
                         }
-                    }
-                    else if (Volatile.Read(ref _producerWaiting) != 0)
-                    {
-                        // Comportamento anterior ao QUEUE-HYST1: sinaliza a cada comando.
-                        _queueSpaceAvailable.Set();
+
+                        topCounts[position] = count;
+                        topIndices[position] = index;
+                        break;
                     }
                 }
             }
+
+            string top = string.Empty;
+
+            for (int i = 0; i < topIndices.Length && topIndices[i] >= 0; i++)
+            {
+                top += $"{(CommandType)topIndices[i]}={topCounts[i]} ";
+            }
+
+            Ryujinx.Common.Logging.Logger.Info?.Print(
+                Ryujinx.Common.Logging.LogClass.Gpu,
+                $"[NEOV2-GAL-COMMAND-PROFILE1] total={total} top={top}");
         }
 
         internal SpanRef<T> CopySpan<T>(ReadOnlySpan<T> data) where T : unmanaged
@@ -300,7 +291,6 @@ namespace Ryujinx.Graphics.GAL.Multithreading
         {
             if (!_queueHysteresis)
             {
-                // Comportamento anterior ao QUEUE-HYST1: volta a cada posicao liberada.
                 while (_producerPtr == (Volatile.Read(ref _consumerPtr) + QueueCount - 1) % QueueCount)
                 {
                     Interlocked.Exchange(ref _producerWaiting, 1);
@@ -317,6 +307,8 @@ namespace Ryujinx.Graphics.GAL.Multithreading
             }
             else if (_producerPtr == (Volatile.Read(ref _consumerPtr) + QueueCount - 1) % QueueCount)
             {
+                _queueFullEpisodes++;
+
                 // If incrementing the producer pointer would overflow, we need to wait.
                 // _consumerPtr can only move forward, so there's no race to worry about here.
 
@@ -324,8 +316,6 @@ namespace Ryujinx.Graphics.GAL.Multithreading
                 // em vez de voltar a cada posicao liberada.
                 while (FreeQueueSlots() < QueueResumeFreeSlots)
                 {
-                    // Anuncia a espera com barreira completa e testa o espaco de novo,
-                    // fechando a janela de wakeup perdido antes de entrar no evento.
                     Interlocked.Exchange(ref _producerWaiting, 1);
 
                     if (FreeQueueSlots() >= QueueResumeFreeSlots)
@@ -333,7 +323,6 @@ namespace Ryujinx.Graphics.GAL.Multithreading
                         break;
                     }
 
-                    // O timeout de 1 ms e apenas uma rede de seguranca; o caminho normal e o Set do consumidor.
                     _queueSpaceAvailable.WaitOne(1);
                 }
 
@@ -344,6 +333,20 @@ namespace Ryujinx.Graphics.GAL.Multithreading
             _lastProducedPtr = taken;
 
             _producerPtr = (_producerPtr + 1) % QueueCount;
+
+            if (_producerPtr == 0)
+            {
+                long wraps = ++_queueTelemetryWraps;
+
+                if (wraps % 100 == 0)
+                {
+                    Ryujinx.Common.Logging.Logger.Info?.Print(
+                        Ryujinx.Common.Logging.LogClass.Gpu,
+                        $"[NEOV2-GAL-QUEUE-PROFILE1] commands={wraps * QueueCount} depth={Volatile.Read(ref _commandCount)} " +
+                        $"maxDepth={_queueMaxDepth} fullEpisodes={_queueFullEpisodes} consumerWaits={_consumerWaits} " +
+                        $"emptyDrains={_consumerEmptyDrains} invokeWaits={_invokeWaits}");
+                }
+            }
 
             Span<byte> memory = new(_commandQueue, taken * _elementSize, _elementSize);
             T* result = (T*)Unsafe.AsPointer(ref memory.GetPinnableReference());
@@ -399,6 +402,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading
         {
             int result = Interlocked.Increment(ref _commandCount);
 
+            if (result > _queueMaxDepth)
+            {
+                _queueMaxDepth = result;
+            }
+
             if (result == 1)
             {
                 _galWorkAvailable.Set();
@@ -407,6 +415,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading
 
         internal void InvokeCommand()
         {
+            _invokeWaits++;
             _invokeRun.Reset();
             _invokePtr = _lastProducedPtr;
 

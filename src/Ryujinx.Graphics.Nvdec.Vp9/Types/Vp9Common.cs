@@ -1090,13 +1090,6 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Types
 
         public void GetMvs(Span<Vp9MvRef> mvs)
         {
-            // NEOV2-VP9RYU132 (Ryubing #132): quadro intra-only nao deixa MVs velhos para o proximo quadro.
-            if (FrameIsIntraOnly())
-            {
-                mvs.Clear();
-                return;
-            }
-
             if (mvs.Length > CurFrameMvs.Length)
             {
                 throw new ArgumentException(

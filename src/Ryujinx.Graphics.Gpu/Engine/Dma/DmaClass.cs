@@ -474,11 +474,10 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
                     // Fast path for clears when remap is enabled.
                     memoryManager.Physical.BufferCache.ClearBuffer(memoryManager, dstGpuVa, size * 4, _state.State.SetRemapConstA);
                 }
-                else if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled && remap && _state.State.SetRemapComponentsDstX == SetRemapComponentsDst.ConstA)
+                else if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled &&
+                         remap &&
+                         _state.State.SetRemapComponentsDstX == SetRemapComponentsDst.ConstA)
                 {
-                    // NEOV2 COSMIC-DMA1: constant fill with remap, as Eden #3211 (required by MARVEL Cosmic Invasion).
-                    // Before, anything other than the exact 4-byte case above fell into the buffer copy below and read a
-                    // source address that a fill never sets (the InvalidMemoryRegionException va=-1 crash).
                     FillConstA(memoryManager, dstGpuVa, size);
                 }
                 else
@@ -639,6 +638,35 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
         /// <param name="srcGpuVa">Source GPU virtual address</param>
         /// <param name="dstGpuVa">Destination GPU virtual address</param>
         /// <param name="size">Size in bytes of the copy</param>
+        private void FillConstA(MemoryManager memoryManager, ulong dstGpuVa, uint size)
+        {
+            int componentSize = (int)_state.State.SetRemapComponentsComponentSize + 1;
+            uint value = _state.State.SetRemapConstA;
+            ulong byteCount = (ulong)size * (ulong)componentSize;
+
+            bool gpuClear = ((dstGpuVa | byteCount) & 3) == 0;
+
+            if (gpuClear)
+            {
+                memoryManager.Physical.BufferCache.ClearBuffer(
+                    memoryManager,
+                    dstGpuVa,
+                    byteCount,
+                    value);
+            }
+            else
+            {
+                byte[] pattern = new byte[byteCount];
+
+                for (int i = 0; i < pattern.Length; i++)
+                {
+                    pattern[i] = (byte)(value >> ((i & 3) * 8));
+                }
+
+                memoryManager.Write(dstGpuVa, pattern);
+            }
+        }
+
         private static void CopyGobBlockLinearToLinear(MemoryManager memoryManager, ulong srcGpuVa, ulong dstGpuVa, ulong size)
         {
             if (((srcGpuVa | dstGpuVa | size) & 0xf) == 0)
@@ -656,40 +684,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
                     byte data = memoryManager.Read<byte>(ConvertGobLinearToBlockLinearAddress(srcGpuVa + offset), true);
                     memoryManager.Write(dstGpuVa + offset, data);
                 }
-            }
-        }
-
-        /// <summary>
-        /// NEOV2 COSMIC-DMA1: remap constant fill for any component size, as Eden MaxwellDMA::Launch (#3211).
-        /// Eden fills LineLengthIn 32-bit values with the constant and writes LineLengthIn * componentSize bytes,
-        /// so the destination receives the 4-byte constant pattern repeated over that many bytes.
-        /// </summary>
-        /// <param name="memoryManager">GPU memory manager</param>
-        /// <param name="dstGpuVa">Destination GPU virtual address</param>
-        /// <param name="size">LineLengthIn, the number of elements</param>
-        private void FillConstA(MemoryManager memoryManager, ulong dstGpuVa, uint size)
-        {
-            int componentSize = (int)_state.State.SetRemapComponentsComponentSize + 1;
-            uint value = _state.State.SetRemapConstA;
-            ulong byteCount = (ulong)size * (ulong)componentSize;
-
-            bool gpuClear = ((dstGpuVa | byteCount) & 3) == 0;
-
-            if (gpuClear)
-            {
-                // Same path as the 4-byte fast clear: fills the GPU buffer and the guest memory.
-                memoryManager.Physical.BufferCache.ClearBuffer(memoryManager, dstGpuVa, byteCount, value);
-            }
-            else
-            {
-                byte[] pattern = new byte[byteCount];
-
-                for (int i = 0; i < pattern.Length; i++)
-                {
-                    pattern[i] = (byte)(value >> ((i & 3) * 8));
-                }
-
-                memoryManager.Write(dstGpuVa, pattern);
             }
         }
 

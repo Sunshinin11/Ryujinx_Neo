@@ -262,6 +262,11 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 if (_fault == null)
                 {
+                    if (error is VulkanSubmissionDeviceLostException)
+                    {
+                        Mua3CrashTelemetry.LogDeviceLost(operation, timelineValue, sequence);
+                    }
+
                     _fault = ExceptionDispatchInfo.Capture(error);
                     _faultOperation = operation;
                     _faultTimelineValue = timelineValue;
@@ -319,6 +324,12 @@ namespace Ryujinx.Graphics.Vulkan
 
             bool wakeWorker = _workQueue.Count == 0;
             item.Sequence = (ulong)Interlocked.Increment(ref _nextSequence);
+
+            if (item.Type == WorkType.Submit)
+            {
+                Mua3CrashTelemetry.RecordSubmission(item.CommandBuffer, item.TimelineValue, item.Sequence);
+            }
+
             _workQueue.Enqueue(item);
 
             if (GezinjinxPerformanceMode.DetailedTelemetry)
@@ -798,7 +809,11 @@ namespace Ryujinx.Graphics.Vulkan
                     BaselineTelemetry.TryFlush();
                     TextureFormatTelemetry.TryFlush();
                     ReadbackDecisionTelemetry.TryLogSnapshot();
-                    PipelineCachePersistence.TryPeriodicSave();
+                    // NEOV2 PIPELINE-EXIT1: serializing the Turnip pipeline cache can
+                    // exceed 200 MiB and stalls rendering even when dispatched through
+                    // Task.Run, because vkGetPipelineCacheData synchronizes with the
+                    // driver and the write saturates storage. SaveAndRelease persists it
+                    // once during a clean renderer shutdown instead.
                 }
             }
         }

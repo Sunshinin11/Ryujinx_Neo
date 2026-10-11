@@ -19,6 +19,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
         private const int MaxIndirectIndexCount = 0x4000000;
 
         private readonly GpuContext _context;
+        // GALAXY-RT-DRAW-DIAG10
+        private int _galaxyActualDrawDiagCount;
+
+        // GALAXY-INPUT-HOST-DIAG14
+        private int _galaxyInputHostProbeCount;
+        private int _galaxyActualClearDiagCount;
         private readonly GpuChannel _channel;
         private readonly DeviceStateWithShadow<ThreedClassState> _state;
         private readonly DrawState _drawState;
@@ -585,6 +591,283 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             int firstInstance,
             bool indexed)
         {
+            // GALAXY-RT-DRAW-DIAG10
+            Image.Texture galaxyRt = _channel.TextureManager.GetAnyRenderTarget();
+
+            // GALAXY-INPUT-HOST-DIAG14
+            if (galaxyRt != null &&
+                galaxyRt.Info.GpuAddress != 0 &&
+                galaxyRt.Info.Width == 1905 &&
+                galaxyRt.Info.Height == 1152)
+            {
+                Span<ShaderState> galaxyProbeShaders = _state.State.ShaderState.AsSpan();
+
+                if (galaxyProbeShaders[5].UnpackEnable() &&
+                    galaxyProbeShaders[5].Offset == 0x1830)
+                {
+                    int galaxyProbeN = ++_galaxyInputHostProbeCount;
+
+                    bool galaxyTakeSample =
+                        galaxyProbeN <= 4 ||
+                        galaxyProbeN == 60 ||
+                        galaxyProbeN == 120 ||
+                        galaxyProbeN == 300 ||
+                        galaxyProbeN == 600;
+
+                    if (galaxyTakeSample)
+                    {
+                        Image.Texture galaxyInput =
+                            _channel.TextureManager.GetGraphicsCachedTextureForBinding(128);
+
+                        if (galaxyInput == null)
+                        {
+                            System.IO.File.AppendAllText(
+                                "/tmp/galaxy-input-host-diag14.log",
+                                $"INPUT n={galaxyProbeN} NULL{Environment.NewLine}");
+                        }
+                        else
+                        {
+                            try
+                            {
+                                using var galaxyData = galaxyInput.HostTexture.GetData();
+                                ReadOnlySpan<byte> galaxySpan = galaxyData.Get();
+
+                                int galaxyHostW = galaxyInput.HostTexture.Width;
+                                int galaxyHostH = galaxyInput.HostTexture.Height;
+                                int galaxyPixels = galaxySpan.Length / 4;
+                                int galaxySamples = Math.Min(4096, galaxyPixels);
+
+                                int galaxyRgbZero = 0;
+                                int galaxyRgbNonZero = 0;
+                                int galaxyAlpha0 = 0;
+                                int galaxyAlpha255 = 0;
+                                int galaxyAlphaOther = 0;
+                                ulong galaxyHash = 1469598103934665603UL;
+
+                                for (int i = 0; i < galaxySamples; i++)
+                                {
+                                    int pixel = galaxySamples <= 1
+                                        ? 0
+                                        : (int)((long)i * (galaxyPixels - 1) / (galaxySamples - 1));
+
+                                    int off = pixel * 4;
+
+                                    byte r = galaxySpan[off + 0];
+                                    byte g = galaxySpan[off + 1];
+                                    byte b = galaxySpan[off + 2];
+                                    byte a = galaxySpan[off + 3];
+
+                                    if (r == 0 && g == 0 && b == 0)
+                                    {
+                                        galaxyRgbZero++;
+                                    }
+                                    else
+                                    {
+                                        galaxyRgbNonZero++;
+                                    }
+
+                                    if (a == 0)
+                                    {
+                                        galaxyAlpha0++;
+                                    }
+                                    else if (a == 255)
+                                    {
+                                        galaxyAlpha255++;
+                                    }
+                                    else
+                                    {
+                                        galaxyAlphaOther++;
+                                    }
+
+                                    galaxyHash ^= r;
+                                    galaxyHash *= 1099511628211UL;
+                                    galaxyHash ^= g;
+                                    galaxyHash *= 1099511628211UL;
+                                    galaxyHash ^= b;
+                                    galaxyHash *= 1099511628211UL;
+                                    galaxyHash ^= a;
+                                    galaxyHash *= 1099511628211UL;
+                                }
+
+                                int galaxyActiveW = Math.Min(1280, galaxyHostW);
+                                int galaxyActiveH = Math.Min(720, galaxyHostH);
+                                int galaxyActivePixels = galaxyActiveW * galaxyActiveH;
+                                int galaxyActiveSamples = Math.Min(4096, galaxyActivePixels);
+
+                                int galaxyActiveRgbZero = 0;
+                                int galaxyActiveRgbNonZero = 0;
+                                int galaxyActiveAlpha0 = 0;
+                                int galaxyActiveAlpha255 = 0;
+                                int galaxyActiveAlphaOther = 0;
+                                ulong galaxyActiveHash = 1469598103934665603UL;
+
+                                for (int i = 0; i < galaxyActiveSamples; i++)
+                                {
+                                    int activePixel = galaxyActiveSamples <= 1
+                                        ? 0
+                                        : (int)((long)i * (galaxyActivePixels - 1) / (galaxyActiveSamples - 1));
+
+                                    int y = activePixel / galaxyActiveW;
+                                    int x = activePixel - y * galaxyActiveW;
+                                    int off = (y * galaxyHostW + x) * 4;
+
+                                    if (off + 3 >= galaxySpan.Length)
+                                    {
+                                        continue;
+                                    }
+
+                                    byte r = galaxySpan[off + 0];
+                                    byte g = galaxySpan[off + 1];
+                                    byte b = galaxySpan[off + 2];
+                                    byte a = galaxySpan[off + 3];
+
+                                    if (r == 0 && g == 0 && b == 0)
+                                    {
+                                        galaxyActiveRgbZero++;
+                                    }
+                                    else
+                                    {
+                                        galaxyActiveRgbNonZero++;
+                                    }
+
+                                    if (a == 0)
+                                    {
+                                        galaxyActiveAlpha0++;
+                                    }
+                                    else if (a == 255)
+                                    {
+                                        galaxyActiveAlpha255++;
+                                    }
+                                    else
+                                    {
+                                        galaxyActiveAlphaOther++;
+                                    }
+
+                                    galaxyActiveHash ^= r;
+                                    galaxyActiveHash *= 1099511628211UL;
+                                    galaxyActiveHash ^= g;
+                                    galaxyActiveHash *= 1099511628211UL;
+                                    galaxyActiveHash ^= b;
+                                    galaxyActiveHash *= 1099511628211UL;
+                                    galaxyActiveHash ^= a;
+                                    galaxyActiveHash *= 1099511628211UL;
+                                }
+
+                                string galaxyHead = galaxySpan.Length == 0
+                                    ? ""
+                                    : Convert.ToHexString(
+                                        galaxySpan.Slice(0, Math.Min(32, galaxySpan.Length)));
+
+                                System.IO.File.AppendAllText(
+                                    "/tmp/galaxy-input-host-diag14.log",
+                                    $"INPUT n={galaxyProbeN} " +
+                                    $"gpuVA=0x{galaxyInput.Info.GpuAddress:X} " +
+                                    $"info={galaxyInput.Info.Width}x{galaxyInput.Info.Height} " +
+                                    $"host={galaxyHostW}x{galaxyHostH} " +
+                                    $"seq={galaxyInput.Group.ModifiedSequence} " +
+                                    $"bytes={galaxySpan.Length} " +
+                                    $"globalSample={galaxySamples} " +
+                                    $"rgb0={galaxyRgbZero} rgbNZ={galaxyRgbNonZero} " +
+                                    $"a0={galaxyAlpha0} a255={galaxyAlpha255} aOther={galaxyAlphaOther} " +
+                                    $"hash=0x{galaxyHash:X16} " +
+                                    $"active={galaxyActiveW}x{galaxyActiveH} " +
+                                    $"activeSample={galaxyActiveSamples} " +
+                                    $"activeRgb0={galaxyActiveRgbZero} activeRgbNZ={galaxyActiveRgbNonZero} " +
+                                    $"activeA0={galaxyActiveAlpha0} activeA255={galaxyActiveAlpha255} activeAOther={galaxyActiveAlphaOther} " +
+                                    $"activeHash=0x{galaxyActiveHash:X16} " +
+                                    $"head={galaxyHead}" +
+                                    Environment.NewLine);
+                            }
+                            catch (Exception ex)
+                            {
+                                System.IO.File.AppendAllText(
+                                    "/tmp/galaxy-input-host-diag14.log",
+                                    $"INPUT n={galaxyProbeN} READ-ERROR " +
+                                    $"{ex.GetType().Name}: {ex.Message}" +
+                                    Environment.NewLine);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (galaxyRt != null &&
+                galaxyRt.Info.GpuAddress != 0 &&
+                galaxyRt.Info.Width == 1905 &&
+                galaxyRt.Info.Height == 1152 &&
+                _galaxyActualDrawDiagCount < 40)
+            {
+                int galaxyN = ++_galaxyActualDrawDiagCount;
+
+                // GALAXY-RT-STATE-DIAG11
+                bool galaxyRasterize = _state.State.RasterizeEnable;
+                bool galaxyMaskShared = _state.State.RtColorMaskShared;
+
+                Span<RtColorMask> galaxyMasks = _state.State.RtColorMask.AsSpan();
+                RtColorMask galaxyMask0 = galaxyMasks[0];
+
+                uint galaxyComponentMask =
+                    (galaxyMask0.UnpackRed() ? 1u : 0u) |
+                    (galaxyMask0.UnpackGreen() ? 2u : 0u) |
+                    (galaxyMask0.UnpackBlue() ? 4u : 0u) |
+                    (galaxyMask0.UnpackAlpha() ? 8u : 0u);
+
+                ref ViewportTransform galaxyVp = ref _state.State.ViewportTransform[0];
+                ref ViewportExtents galaxyVpExt = ref _state.State.ViewportExtents[0];
+                ref ScissorState galaxySc = ref _state.State.ScissorState[0];
+                ref ScreenScissorState galaxyScreenSc = ref _state.State.ScreenScissorState;
+
+                bool galaxyScissorEnable = galaxySc.Enable;
+
+                Span<ShaderState> galaxyShaders = _state.State.ShaderState.AsSpan();
+
+                // GALAXY-EXACT-BIND-DIAG13
+                Image.Texture galaxyInput128 = null;
+
+                if (galaxyShaders[5].UnpackEnable() &&
+                    galaxyShaders[5].Offset == 0x1830)
+                {
+                    galaxyInput128 = _channel.TextureManager.GetGraphicsCachedTextureForBinding(128);
+                }
+
+                string galaxyInput128Info = galaxyInput128 != null
+                    ? $"input128=[gpuVA=0x{galaxyInput128.Info.GpuAddress:X}," +
+                      $"tex={galaxyInput128.Info.Width}x{galaxyInput128.Info.Height}," +
+                      $"host={galaxyInput128.HostTexture.Width}x{galaxyInput128.HostTexture.Height}," +
+                      $"format={galaxyInput128.Info.FormatInfo.Format}," +
+                      $"target={galaxyInput128.Target}," +
+                      $"seq={galaxyInput128.Group.ModifiedSequence}," +
+                      $"invalidSeq={galaxyInput128.InvalidatedSequence}] "
+                    : "input128=[NULL] ";
+
+                System.IO.File.AppendAllText(
+                    "/tmp/galaxy-rt-draw-diag10.log",
+                    $"DRAW n={galaxyN} " +
+                    $"gpuVA=0x{galaxyRt.Info.GpuAddress:X} " +
+                    $"rt={galaxyRt.Info.Width}x{galaxyRt.Info.Height} " +
+                    $"host={galaxyRt.HostTexture.Width}x{galaxyRt.HostTexture.Height} " +
+                    $"seq={galaxyRt.Group.ModifiedSequence} " +
+                    $"count={count} instances={instanceCount} indexed={indexed} " +
+                    $"compute={_drawState.VertexAsCompute != null} " +
+                    $"topology={_drawState.Topology} " +
+                    $"rasterize={galaxyRasterize} " +
+                    $"maskShared={galaxyMaskShared} mask0=0x{galaxyMask0.Packed:X} components=0x{galaxyComponentMask:X} " +
+                    $"vpEnable={_state.State.ViewportTransformEnable} " +
+                    $"vp0=[sx={galaxyVp.ScaleX},sy={galaxyVp.ScaleY},tx={galaxyVp.TranslateX},ty={galaxyVp.TranslateY},sz={galaxyVp.ScaleZ}] " +
+                    $"depth=[{galaxyVpExt.DepthNear},{galaxyVpExt.DepthFar}] " +
+                    $"screenSc=[x={galaxyScreenSc.X},y={galaxyScreenSc.Y},w={galaxyScreenSc.Width},h={galaxyScreenSc.Height}] " +
+                    $"sc0=[en={galaxyScissorEnable},x1={galaxySc.X1},y1={galaxySc.Y1},x2={galaxySc.X2},y2={galaxySc.Y2}] " +
+                    $"scale={_channel.TextureManager.RenderTargetScale} " +
+                    galaxyInput128Info +
+                    $"sh0=[{galaxyShaders[0].Type},en={galaxyShaders[0].UnpackEnable()},ctl=0x{galaxyShaders[0].Control:X},off=0x{galaxyShaders[0].Offset:X}] " +
+                    $"sh1=[{galaxyShaders[1].Type},en={galaxyShaders[1].UnpackEnable()},ctl=0x{galaxyShaders[1].Control:X},off=0x{galaxyShaders[1].Offset:X}] " +
+                    $"sh2=[{galaxyShaders[2].Type},en={galaxyShaders[2].UnpackEnable()},ctl=0x{galaxyShaders[2].Control:X},off=0x{galaxyShaders[2].Offset:X}] " +
+                    $"sh3=[{galaxyShaders[3].Type},en={galaxyShaders[3].UnpackEnable()},ctl=0x{galaxyShaders[3].Control:X},off=0x{galaxyShaders[3].Offset:X}] " +
+                    $"sh4=[{galaxyShaders[4].Type},en={galaxyShaders[4].UnpackEnable()},ctl=0x{galaxyShaders[4].Control:X},off=0x{galaxyShaders[4].Offset:X}] " +
+                    $"sh5=[{galaxyShaders[5].Type},en={galaxyShaders[5].UnpackEnable()},ctl=0x{galaxyShaders[5].Control:X},off=0x{galaxyShaders[5].Offset:X}]" +
+                    Environment.NewLine);
+            }
+
             if (instanceCount > 1)
             {
                 _channel.BufferManager.SetInstancedDrawVertexCount(count);
@@ -919,6 +1202,30 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             }
 
             _channel.TextureManager.UpdateRenderTargets();
+
+            // GALAXY-RT-DRAW-DIAG10
+            Image.Texture galaxyClearRt = _channel.TextureManager.GetAnyRenderTarget();
+
+            if (galaxyClearRt != null &&
+                galaxyClearRt.Info.GpuAddress != 0 &&
+                galaxyClearRt.Info.Width == 1905 &&
+                galaxyClearRt.Info.Height == 1152 &&
+                (componentMask != 0 || clearDepth || clearStencil) &&
+                _galaxyActualClearDiagCount < 20)
+            {
+                int galaxyN = ++_galaxyActualClearDiagCount;
+
+                System.IO.File.AppendAllText(
+                    "/tmp/galaxy-rt-draw-diag10.log",
+                    $"CLEAR n={galaxyN} " +
+                    $"gpuVA=0x{galaxyClearRt.Info.GpuAddress:X} " +
+                    $"rt={galaxyClearRt.Info.Width}x{galaxyClearRt.Info.Height} " +
+                    $"host={galaxyClearRt.HostTexture.Width}x{galaxyClearRt.HostTexture.Height} " +
+                    $"seq={galaxyClearRt.Group.ModifiedSequence} " +
+                    $"colorMask=0x{componentMask:X} depth={clearDepth} stencil={clearStencil} " +
+                    $"index={index} layer={layer}" +
+                    Environment.NewLine);
+            }
 
             if (componentMask != 0)
             {

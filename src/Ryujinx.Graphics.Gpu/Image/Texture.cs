@@ -107,9 +107,8 @@ namespace Ryujinx.Graphics.Gpu.Image
         public int InvalidatedSequence { get; private set; }
 
         private int _depth;
-                private int _layers;
+        private int _layers;
 
-        // NEOV2 EDEN3D1: upload assincrono de texturas 3D grandes (estilo Eden QueueAsyncUnswizzle).
         private const int Eden3DMinBytes = 4 * 1024 * 1024;
         private int _eden3dGeneration;
         private Eden3DPendingUpload _eden3dPending;
@@ -121,9 +120,11 @@ namespace Ryujinx.Graphics.Gpu.Image
             public readonly ITexture Target;
             public readonly string Detail;
             public readonly long StartTicks;
+
             private MemoryOwner<byte> _result;
             private bool _resultTaken;
             private bool _disposed;
+
             public int Done;
 
             public Eden3DPendingUpload(int generation, ITexture target, string detail = null)
@@ -137,9 +138,11 @@ namespace Ryujinx.Graphics.Gpu.Image
             public void SetResult(MemoryOwner<byte> result)
             {
                 bool disposeResult;
+
                 lock (this)
                 {
                     disposeResult = _disposed;
+
                     if (!disposeResult)
                     {
                         _result = result;
@@ -162,20 +165,24 @@ namespace Ryujinx.Graphics.Gpu.Image
                     }
 
                     _resultTaken = true;
-                    MemoryOwner<byte> res = _result;
+
+                    MemoryOwner<byte> result = _result;
                     _result = null;
-                    return res;
+
+                    return result;
                 }
             }
 
             public void DisposeResult()
             {
                 MemoryOwner<byte> toDispose = null;
+
                 lock (this)
                 {
                     if (!_disposed)
                     {
                         _disposed = true;
+
                         if (!_resultTaken)
                         {
                             toDispose = _result;
@@ -183,6 +190,7 @@ namespace Ryujinx.Graphics.Gpu.Image
                         }
                     }
                 }
+
                 toDispose?.Dispose();
             }
         }
@@ -218,11 +226,6 @@ namespace Ryujinx.Graphics.Gpu.Image
         public LinkedListNode<Texture> CacheNode { get; set; }
 
         /// <summary>
-        /// NEOV2-GPUMEM1: last auto delete cache frame where this texture was used (Eden-style collection).
-        /// </summary>
-        public ulong CacheLastUseFrame;
-
-        /// <summary>
         /// Entry for this texture in the short duration cache, if present.
         /// </summary>
         public ShortTextureCacheEntry ShortCacheEntry { get; set; }
@@ -251,6 +254,9 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// Whether or not the texture belongs is a view.
         /// </summary>
         public bool IsView => _viewStorage != this;
+
+        // VIEWTRACE-E31 (diagnostic): expose the storage texture this view aliases.
+        public Texture ViewStorageE31 => _viewStorage;
 
         /// <summary>
         /// Whether or not this texture has views.
@@ -734,6 +740,61 @@ namespace Ryujinx.Graphics.Gpu.Image
         {
             ReadOnlySpan<byte> data = _physicalMemory.GetSpan(Range);
 
+            // GALAXY-TEX-UPLOAD-DIAG16
+            bool galaxyDiag16 = Info.GpuAddress == 0x1CF970000UL;
+            string galaxyGuestDiag16 = "";
+
+            if (galaxyDiag16)
+            {
+                try
+                {
+                    int sampleCount = Math.Min(4096, data.Length);
+                    int zero = 0;
+                    int ff = 0;
+                    int other = 0;
+                    ulong hash = 1469598103934665603UL;
+
+                    for (int i = 0; i < sampleCount; i++)
+                    {
+                        int pos = sampleCount <= 1
+                            ? 0
+                            : (int)((long)i * (data.Length - 1) / (sampleCount - 1));
+
+                        byte value = data[pos];
+
+                        if (value == 0)
+                        {
+                            zero++;
+                        }
+                        else if (value == 0xff)
+                        {
+                            ff++;
+                        }
+                        else
+                        {
+                            other++;
+                        }
+
+                        hash ^= value;
+                        hash *= 1099511628211UL;
+                    }
+
+                    string head = data.Length == 0
+                        ? ""
+                        : Convert.ToHexString(data[..Math.Min(32, data.Length)]);
+
+                    galaxyGuestDiag16 =
+                        $"GUEST bytes={data.Length} sample={sampleCount} " +
+                        $"zero={zero} ff={ff} other={other} " +
+                        $"hash=0x{hash:X16} head={head}";
+                }
+                catch (Exception ex)
+                {
+                    galaxyGuestDiag16 =
+                        $"GUEST-ERROR {ex.GetType().Name}:{ex.Message}";
+                }
+            }
+
             if (TryStartEden3DUpload(data))
             {
                 return;
@@ -764,7 +825,80 @@ namespace Ryujinx.Graphics.Gpu.Image
                 }
             }
 
+            long neoConvT0 = System.Diagnostics.Stopwatch.GetTimestamp();
             MemoryOwner<byte> result = ConvertToHostCompatibleFormat(data);
+            if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddConvert(neoConvT0);
+
+            // GALAXY-TEX-UPLOAD-DIAG16
+            if (galaxyDiag16)
+            {
+                string galaxyConvertedDiag16 = "";
+
+                try
+                {
+                    ReadOnlySpan<byte> converted = result.Span;
+
+                    int sampleCount = Math.Min(4096, converted.Length);
+                    int zero = 0;
+                    int ff = 0;
+                    int other = 0;
+                    ulong hash = 1469598103934665603UL;
+
+                    for (int i = 0; i < sampleCount; i++)
+                    {
+                        int pos = sampleCount <= 1
+                            ? 0
+                            : (int)((long)i * (converted.Length - 1) / (sampleCount - 1));
+
+                        byte value = converted[pos];
+
+                        if (value == 0)
+                        {
+                            zero++;
+                        }
+                        else if (value == 0xff)
+                        {
+                            ff++;
+                        }
+                        else
+                        {
+                            other++;
+                        }
+
+                        hash ^= value;
+                        hash *= 1099511628211UL;
+                    }
+
+                    string head = converted.Length == 0
+                        ? ""
+                        : Convert.ToHexString(converted[..Math.Min(32, converted.Length)]);
+
+                    galaxyConvertedDiag16 =
+                        $"CONVERTED bytes={converted.Length} sample={sampleCount} " +
+                        $"zero={zero} ff={ff} other={other} " +
+                        $"hash=0x{hash:X16} head={head}";
+                }
+                catch (Exception ex)
+                {
+                    galaxyConvertedDiag16 =
+                        $"CONVERTED-ERROR {ex.GetType().Name}:{ex.Message}";
+                }
+
+                ulong galaxyPhysDiag16 =
+                    Range.Count > 0 ? Range.GetSubRange(0).Address : 0UL;
+
+                System.IO.File.AppendAllText(
+                    "/tmp/galaxy-texture-diag16.log",
+                    $"SYNC gpuVA=0x{Info.GpuAddress:X} " +
+                    $"phys=0x{galaxyPhysDiag16:X} ranges={Range.Count} " +
+                    $"info={Info.Width}x{Info.Height} " +
+                    $"format={Info.FormatInfo.Format} target={Info.Target} " +
+                    $"linear={Info.IsLinear} gobY={Info.GobBlocksInY} gobZ={Info.GobBlocksInZ} " +
+                    $"scale={ScaleFactor} " +
+                    galaxyGuestDiag16 + " " +
+                    galaxyConvertedDiag16 +
+                    Environment.NewLine);
+            }
 
             if (ScaleFactor != 1f && AllowScaledSetData())
             {
@@ -777,7 +911,7 @@ namespace Ryujinx.Graphics.Gpu.Image
             }
             else
             {
-                HostTexture.SetData(result);
+                if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddTextureUpload(result.Memory.Length); HostTexture.SetData(result);
             }
 
             _hasData = true;
@@ -797,7 +931,7 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             AlwaysFlushOnOverlap = true;
 
-            HostTexture.SetData(data);
+            if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddTextureUpload(data.Memory.Length); HostTexture.SetData(data);
 
             _hasData = true;
         }
@@ -814,7 +948,7 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             InvalidateEden3DUpload();
 
-            HostTexture.SetData(data, layer, level);
+            if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddTextureUpload(data.Memory.Length); HostTexture.SetData(data, layer, level);
 
             _currentData = null;
 
@@ -834,7 +968,7 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             InvalidateEden3DUpload();
 
-            HostTexture.SetData(data, layer, level, region);
+            if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddTextureUpload(data.Memory.Length); HostTexture.SetData(data, layer, level, region);
 
             _currentData = null;
 
@@ -1328,6 +1462,21 @@ namespace Ryujinx.Graphics.Gpu.Image
         }
 
         /// <summary>
+        /// Checks if two formats only differ by sRGB encoding (RGBA8/BGRA8).
+        /// </summary>
+        private static bool IsSrgbUnormPair(Format a, Format b)
+        {
+            static Format Linear(Format f) => f switch
+            {
+                Format.R8G8B8A8Srgb => Format.R8G8B8A8Unorm,
+                Format.B8G8R8A8Srgb => Format.B8G8R8A8Unorm,
+                _ => f,
+            };
+
+            return Linear(a) == Linear(b) && (Linear(a) == Format.R8G8B8A8Unorm || Linear(a) == Format.B8G8R8A8Unorm);
+        }
+
+        /// <summary>
         /// Check if it's possible to create a view, with the given parameters, from this texture.
         /// </summary>
         /// <param name="info">Texture view information</param>
@@ -1362,7 +1511,8 @@ namespace Ryujinx.Graphics.Gpu.Image
                     result = TextureViewCompatibility.Incompatible;
                 }
 
-                if (result == TextureViewCompatibility.Full && Info.FormatInfo.Format != info.FormatInfo.Format && !_context.Capabilities.SupportsMismatchingViewFormat)
+                if (result == TextureViewCompatibility.Full && Info.FormatInfo.Format != info.FormatInfo.Format && !_context.Capabilities.SupportsMismatchingViewFormat &&
+                    !(_context.Capabilities.SupportsSrgbMismatchingViewFormat && IsSrgbUnormPair(Info.FormatInfo.Format, info.FormatInfo.Format)))
                 {
                     // AMD and Intel have a bug where the view format is always ignored;
                     // they use the parent format instead.
@@ -1382,9 +1532,40 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             int offset = Range.FindOffset(range);
 
-            if (offset < 0 || !_sizeInfo.FindView(offset, out firstLayer, out firstLevel) ||
-                !TextureCompatibility.ViewLayoutCompatible(Info, info, firstLevel) ||
-                info.GetSlices() > 1 && LayerSize != layerSize)
+            bool galaxyOffsetOk = offset >= 0;
+            bool galaxyFindView = galaxyOffsetOk &&
+                _sizeInfo.FindView(offset, out firstLayer, out firstLevel);
+
+            bool galaxyLayoutCompatible = galaxyFindView &&
+                TextureCompatibility.ViewLayoutCompatible(Info, info, firstLevel);
+
+            bool galaxyLayerCompatible =
+                !(info.GetSlices() > 1 && LayerSize != layerSize);
+
+            // GALAXY-LAYOUT-DIAG6
+            if (Info.Width == 1905 &&
+                Info.Height == 1152 &&
+                info.Width == 1920 &&
+                info.Height == 1080)
+            {
+                System.IO.File.AppendAllText(
+                    "/tmp/galaxy-layout-diag6.log",
+                    $"addr=0x{Range.GetSubRange(0).Address:X} " +
+                    $"offset={offset} offsetOK={galaxyOffsetOk} " +
+                    $"findView={galaxyFindView} " +
+                    $"firstLayer={firstLayer} firstLevel={firstLevel} " +
+                    $"layout={galaxyLayoutCompatible} " +
+                    $"lhsGobY={Info.GobBlocksInY} lhsGobZ={Info.GobBlocksInZ} " +
+                    $"rhsGobY={info.GobBlocksInY} rhsGobZ={info.GobBlocksInZ} " +
+                    $"lhsLayerSize={LayerSize} rhsLayerSize={layerSize} " +
+                    $"rhsSlices={info.GetSlices()} layerOK={galaxyLayerCompatible}" +
+                    Environment.NewLine);
+            }
+
+            if (!galaxyOffsetOk ||
+                !galaxyFindView ||
+                !galaxyLayoutCompatible ||
+                !galaxyLayerCompatible)
             {
                 return TextureViewCompatibility.LayoutIncompatible;
             }
@@ -1877,6 +2058,7 @@ namespace Ryujinx.Graphics.Gpu.Image
                 Group.Dispose();
             }
         }
+
         private bool TryStartEden3DUpload(ReadOnlySpan<byte> data)
         {
             if (!GraphicsConfig.AsyncLarge3DTextureUpload ||
@@ -1892,7 +2074,9 @@ namespace Ryujinx.Graphics.Gpu.Image
             int generation = System.Threading.Interlocked.Increment(ref _eden3dGeneration);
             Eden3DPendingUpload pending = new(generation, HostTexture);
 
-            Eden3DPendingUpload previous = System.Threading.Interlocked.Exchange(ref _eden3dPending, pending);
+            Eden3DPendingUpload previous =
+                System.Threading.Interlocked.Exchange(ref _eden3dPending, pending);
+
             previous?.DisposeResult();
 
             _currentData = null;
@@ -1908,7 +2092,9 @@ namespace Ryujinx.Graphics.Gpu.Image
                 }
                 catch (Exception ex)
                 {
-                    Logger.Warning?.Print(LogClass.Gpu, $"Failed async 3D texture conversion: {ex.GetType().Name}: {ex.Message}");
+                    Logger.Warning?.Print(
+                        LogClass.Gpu,
+                        $"Failed async 3D texture conversion: {ex.GetType().Name}: {ex.Message}");
                 }
                 finally
                 {
@@ -1918,7 +2104,9 @@ namespace Ryujinx.Graphics.Gpu.Image
                 pending.SetResult(result);
                 System.Threading.Volatile.Write(ref pending.Done, 1);
 
-                if (!ReferenceEquals(System.Threading.Volatile.Read(ref _eden3dPending), pending))
+                if (!ReferenceEquals(
+                    System.Threading.Volatile.Read(ref _eden3dPending),
+                    pending))
                 {
                     pending.DisposeResult();
                 }
@@ -1933,14 +2121,21 @@ namespace Ryujinx.Graphics.Gpu.Image
 
         private void TryApplyEden3DUpload()
         {
-            Eden3DPendingUpload pending = System.Threading.Volatile.Read(ref _eden3dPending);
+            Eden3DPendingUpload pending =
+                System.Threading.Volatile.Read(ref _eden3dPending);
 
-            if (pending == null || System.Threading.Volatile.Read(ref pending.Done) == 0)
+            if (pending == null ||
+                System.Threading.Volatile.Read(ref pending.Done) == 0)
             {
                 return;
             }
 
-            if (!ReferenceEquals(System.Threading.Interlocked.CompareExchange(ref _eden3dPending, null, pending), pending))
+            if (!ReferenceEquals(
+                System.Threading.Interlocked.CompareExchange(
+                    ref _eden3dPending,
+                    null,
+                    pending),
+                pending))
             {
                 return;
             }
@@ -1948,7 +2143,8 @@ namespace Ryujinx.Graphics.Gpu.Image
             MemoryOwner<byte> result = pending.TryTakeResult();
 
             if (result == null ||
-                pending.Generation != System.Threading.Volatile.Read(ref _eden3dGeneration) ||
+                pending.Generation !=
+                    System.Threading.Volatile.Read(ref _eden3dGeneration) ||
                 !ReferenceEquals(pending.Target, HostTexture))
             {
                 result?.Dispose();
@@ -1957,18 +2153,19 @@ namespace Ryujinx.Graphics.Gpu.Image
                 return;
             }
 
-            // SetData can queue the upload on the threaded renderer. The queued command
-            // owns the buffer and disposes it after the backend has consumed its data.
-            HostTexture.SetData(result);
+            // Threaded renderer assume ownership of the buffer.
+            if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddTextureUpload(result.Memory.Length); HostTexture.SetData(result);
 
             ResyncAfterEden3DUpload();
         }
 
         internal bool TryApplyReady3DUpload()
         {
-            Eden3DPendingUpload pending = System.Threading.Volatile.Read(ref _eden3dPending);
+            Eden3DPendingUpload pending =
+                System.Threading.Volatile.Read(ref _eden3dPending);
 
-            if (pending == null || System.Threading.Volatile.Read(ref pending.Done) == 0)
+            if (pending == null ||
+                System.Threading.Volatile.Read(ref pending.Done) == 0)
             {
                 return false;
             }
@@ -1982,19 +2179,21 @@ namespace Ryujinx.Graphics.Gpu.Image
             if (_eden3dResyncNeeded && _eden3dPending == null)
             {
                 _eden3dResyncNeeded = false;
-
                 SynchronizeFull();
             }
         }
 
         private void InvalidateEden3DUpload()
         {
-            Eden3DPendingUpload pending = System.Threading.Interlocked.Exchange(ref _eden3dPending, null);
+            Eden3DPendingUpload pending =
+                System.Threading.Interlocked.Exchange(ref _eden3dPending, null);
+
             if (pending != null)
             {
                 System.Threading.Interlocked.Increment(ref _eden3dGeneration);
                 pending.DisposeResult();
             }
         }
+
     }
 }

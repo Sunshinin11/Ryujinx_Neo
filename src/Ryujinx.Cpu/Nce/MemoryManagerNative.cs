@@ -1,6 +1,5 @@
-using ARMeilleure.Memory;
 using Ryujinx.Common.Logging;
-using Ryujinx.Common;
+using ARMeilleure.Memory;
 using Ryujinx.Memory;
 using Ryujinx.Memory.Range;
 using Ryujinx.Memory.Tracking;
@@ -23,8 +22,7 @@ namespace Ryujinx.Cpu.Nce
 
         private readonly MemoryEhMeilleure _memoryEh;
 
-        private readonly ManagedPageFlags _pages;
-        private readonly NceMemoryProtectionMap _protections;
+        private ManagedPageFlags _pages;
 
         /// <inheritdoc/>
         public bool UsesPrivateAllocations => false;
@@ -33,18 +31,7 @@ namespace Ryujinx.Cpu.Nce
 
         public ulong ReservedSize => (ulong)_addressSpace.Pointer.ToInt64();
 
-        // Actual native VA reservation, including code patch islands allocated by the loader.
-        internal ulong GuestAddressStart => ReservedSize;
-        internal ulong GuestAddressEnd => checked(ReservedSize + _addressSpace.Size);
-
         public MemoryManagerType Type => MemoryManagerType.HostMappedUnsafe;
-        public bool HasGuestPermissionComposition => _protections != null;
-
-        // The initial mapping contract must not erase a remapped region's tracking demand.
-        public void SetMappedPermission(ulong address, ulong size, MemoryPermission permission)
-        {
-            _protections.SetGuest(address, size, permission, restoreTracking: true);
-        }
 
         public MemoryTracking Tracking { get; }
 
@@ -84,38 +71,25 @@ namespace Ryujinx.Cpu.Nce
             _pages = new ManagedPageFlags(asBits);
 
             _addressSpace = addressSpace;
-
-            if (PlatformInfo.IsBionic)
-                _protections = new NceMemoryProtectionMap(GuestAddressStart, _addressSpace.Size,
-                    MemoryBlock.GetPageSize(), ApplyNativeProtection);
+            AddressSpaceSize = ReservedSize + addressSpaceSize;
 
             Tracking = new MemoryTracking(this, PageSize, invalidAccessHandler);
-            _memoryEh = new MemoryEhMeilleure(addressSpaceSize, Tracking,
-                _protections != null ? HandleGuestTrackingFault : null);
+            _memoryEh = new MemoryEhMeilleure(addressSpace, null, Tracking);
+            _pages.NceTrackingAddressOffset = ReservedSize;
+            _memoryEh.NceTrackingAddressOffset = ReservedSize;
         }
 
         /// <inheritdoc/>
         public void Map(ulong va, ulong pa, ulong size, MemoryMapFlags flags)
         {
+            va = AddressToOffset(va);
             AssertValidAddressAndSize(va, size);
 
-            if (_protections != null)
-            {
-                _protections.Map(va, size, () =>
-                {
-                    _addressSpace.MapView(_backingMemory, pa, AddressToOffset(va), size);
-                    _pages.AddMapping(va, size);
-                    PtMap(va, pa, size);
-                });
-                // Do not hold the protection lock while entering tracking callbacks.
-                Tracking.Map(va, size);
-                return;
-            }
             _addressSpace.MapView(_backingMemory, pa, AddressToOffset(va), size);
             _pages.AddMapping(va, size);
             PtMap(va, pa, size);
 
-            Tracking.Map(va, size);
+            Tracking.Map(va + ReservedSize, size);
         }
 
         private void PtMap(ulong va, ulong pa, ulong size)
@@ -133,21 +107,12 @@ namespace Ryujinx.Cpu.Nce
         /// <inheritdoc/>
         public void Unmap(ulong va, ulong size)
         {
+            va = AddressToOffset(va);
             AssertValidAddressAndSize(va, size);
 
-            UnmapEvent?.Invoke(va, size);
-            Tracking.Unmap(va, size);
+            UnmapEvent?.Invoke(va + ReservedSize, size);
+            Tracking.Unmap(va + ReservedSize, size);
 
-            if (_protections != null)
-            {
-                _protections.Unmap(va, size, () =>
-                {
-                    _pages.RemoveMapping(va, size);
-                    PtUnmap(va, size);
-                    _addressSpace.UnmapView(_backingMemory, AddressToOffset(va), size);
-                });
-                return;
-            }
             _pages.RemoveMapping(va, size);
             PtUnmap(va, size);
             _addressSpace.UnmapView(_backingMemory, AddressToOffset(va), size);
@@ -167,34 +132,26 @@ namespace Ryujinx.Cpu.Nce
         /// <inheritdoc/>
         public void Reprotect(ulong va, ulong size, MemoryPermission protection)
         {
-            if (_protections != null)
-            {
-                bool restored = _protections.SetGuest(va, size, protection, TrackingProtectionRestoreEnabled);
-                if (restored && !_protectionRestoreLogged)
-                {
-                    _protectionRestoreLogged = true;
-                    Logger.Info?.Print(LogClass.Cpu, $"[NEOV2-NCE-PROT1] Tracking protection restored after a guest permission change at 0x{va:X} (0x{size:X} bytes)");
-                }
-                return;
-            }
             _addressSpace.Reprotect(AddressToOffset(va), size, protection);
 
-            // NEOV2 NCE-PROT1: on NCE the guest permission is applied to the same host pages the memory tracking
-            // protects. Put the tracking protection back, so GPU tracked pages keep faulting on CPU access.
-            if (TrackingProtectionRestoreEnabled && Tracking.RestoreGuestProtection(va, size) && !_protectionRestoreLogged)
+            if (TrackingProtectionRestoreEnabled &&
+                Tracking.RestoreGuestProtection(va, size) &&
+                !_protectionRestoreLogged)
             {
                 _protectionRestoreLogged = true;
-                Logger.Info?.Print(LogClass.Cpu, $"[NEOV2-NCE-PROT1] Tracking protection restored after a guest permission change at 0x{va:X} (0x{size:X} bytes)");
+
+                Logger.Info?.Print(
+                    LogClass.Cpu,
+                    $"[NEOV2-NCE-PROT1] Tracking protection restored after a guest permission change at 0x{va:X} (0x{size:X} bytes)");
             }
         }
 
         private static bool _protectionRestoreLogged;
 
         /// <summary>
-        /// NEOV2 NCE-PROT1: per game switch for restoring tracking protection after guest permission changes.
-        /// Off by default. Set by the frontend before the game is loaded.
+        /// NCE-PROT1. Disabled by default until enabled by a game profile.
         /// </summary>
-        public static bool TrackingProtectionRestoreEnabled { get; set; }
+        public static bool TrackingProtectionRestoreEnabled { get; set; } = false;
 
         public ref T GetRef<T>(ulong va) where T : unmanaged
         {
@@ -211,12 +168,14 @@ namespace Ryujinx.Cpu.Nce
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public override bool IsMapped(ulong va)
         {
+            va = AddressToOffset(va);
             return ValidateAddress(va) && _pages.IsMapped(va);
         }
 
         /// <inheritdoc/>
         public bool IsRangeMapped(ulong va, ulong size)
         {
+            va = AddressToOffset(va);
             AssertValidAddressAndSize(va, size);
 
             return _pages.IsRangeMapped(va, size);
@@ -261,6 +220,7 @@ namespace Ryujinx.Cpu.Nce
 
         private List<MemoryRange> GetPhysicalRegionsImpl(ulong va, ulong size)
         {
+            va = AddressToOffset(va);
             if (!ValidateAddress(va) || !ValidateAddressAndSize(va, size))
             {
                 return null;
@@ -310,6 +270,7 @@ namespace Ryujinx.Cpu.Nce
 
         private ulong GetPhysicalAddressInternal(ulong va)
         {
+            va = AddressToOffset(va);
             return _pageTable.Read(va) + (va & PageMask);
         }
 
@@ -319,11 +280,12 @@ namespace Ryujinx.Cpu.Nce
         /// </remarks>
         public override void SignalMemoryTracking(ulong va, ulong size, bool write, bool precise = false, int? exemptId = null)
         {
+            va = AddressToOffset(va);
             AssertValidAddressAndSize(va, size);
 
             if (precise)
             {
-                Tracking.VirtualMemoryEvent(va, size, write, precise: true, exemptId);
+                Tracking.VirtualMemoryEvent(va + ReservedSize, size, write, precise: true, exemptId);
                 return;
             }
 
@@ -333,10 +295,10 @@ namespace Ryujinx.Cpu.Nce
         /// <inheritdoc/>
         public void TrackingReprotect(ulong va, ulong size, MemoryPermission protection, bool guest)
         {
+            va = AddressToOffset(va);
             if (guest)
             {
-                if (_protections != null) _protections.SetTracking(va, size, protection);
-                else _addressSpace.Reprotect(AddressToOffset(va), size, protection, false);
+                _addressSpace.Reprotect(AddressToOffset(va), size, protection, false);
             }
             else
             {
@@ -347,69 +309,40 @@ namespace Ryujinx.Cpu.Nce
         /// <inheritdoc/>
         public RegionHandle BeginTracking(ulong address, ulong size, int id, RegionFlags flags)
         {
-            return Tracking.BeginTracking(address, size, id, flags);
+            address = AddressToOffset(address);
+            return Tracking.BeginTracking(address + ReservedSize, size, id, flags);
         }
 
         /// <inheritdoc/>
         public MultiRegionHandle BeginGranularTracking(ulong address, ulong size, IEnumerable<IRegionHandle> handles, ulong granularity, int id, RegionFlags flags)
         {
-            return Tracking.BeginGranularTracking(address, size, handles, granularity, id, flags);
+            address = AddressToOffset(address);
+            return Tracking.BeginGranularTracking(address + ReservedSize, size, handles, granularity, id, flags);
         }
 
         /// <inheritdoc/>
         public SmartMultiRegionHandle BeginSmartGranularTracking(ulong address, ulong size, ulong granularity, int id)
         {
-            return Tracking.BeginSmartGranularTracking(address, size, granularity, id);
-        }
-
-        private void ApplyNativeProtection(ulong address, ulong size, MemoryPermission permission)
-        {
-            _addressSpace.Reprotect(AddressToOffset(address), size, permission);
-        }
-
-        // Only a genuine data-tracking fault may mark GPU resources dirty.
-        // Kernel frame classification (including prefetch) stays in the approved R10 path.
-        private ulong HandleGuestTrackingFault(ulong address, ulong size, bool write)
-        {
-            if (!_protections.IsGuestAccessAllowed(address, size, write))
-            {
-                return 0;
-            }
-            ulong pageMask = (ulong)PageSize - 1;
-            ulong aligned = address & ~pageMask;
-            ulong end = checked((address + size + pageMask) & ~pageMask);
-            try
-            {
-                if (!Tracking.VirtualMemoryEvent(aligned, end - aligned, write))
-                {
-                    return 0;
-                }
-
-                // Tracking releases its lock before returning. Another thread may have
-                // rearmed R/None already; that still permits a retry of a valid guest access.
-                // Only a revoked guest contract/unmap makes this an unhandled fault.
-                var access = _protections.GetAccessState(address, size, write);
-                if (!access.GuestAllowed)
-                {
-                    return 0;
-                }
-                return address;
-            }
-            catch (Exception exception) when (exception is Ryujinx.Memory.MemoryProtectionException or InvalidMemoryRegionException or ArgumentException)
-            {
-                // A failed mprotect cannot be reported as a handled fault or retried forever.
-                return 0;
-            }
+            address = AddressToOffset(address);
+            return Tracking.BeginSmartGranularTracking(address + ReservedSize, size, granularity, id);
         }
 
         private ulong AddressToOffset(ulong address)
         {
-            if (address < ReservedSize)
+            ulong reservedSize = ReservedSize;
+            ulong logicalAddressSpaceSize = AddressSpaceSize - reservedSize;
+
+            if (address >= reservedSize)
             {
-                throw new ArgumentException($"Invalid address 0x{address:x16}");
+                address -= reservedSize;
             }
 
-            return address - ReservedSize;
+            if (address >= logicalAddressSpaceSize)
+            {
+                throw new ArgumentException("Invalid NCE virtual address");
+            }
+
+            return address;
         }
 
         /// <summary>

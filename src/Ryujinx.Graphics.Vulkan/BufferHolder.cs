@@ -611,8 +611,7 @@ namespace Ryujinx.Graphics.Vulkan
 
                         if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled && srcHolder == null)
                         {
-                            // NEOV2-COSMIC2: o buffer temporario nao pode ser criado (ex.: tamanho grande demais).
-                            // Antes isso dava NullReferenceException; agora o upload e ignorado.
+                            // Buffer temporário inválido: ignora upload em vez de derrubar o renderer.
                         }
                         else
                         {
@@ -722,10 +721,9 @@ namespace Ryujinx.Graphics.Vulkan
             int size,
             bool registerSrcUsage = true)
         {
-            if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled && (src == null || dst == null))
+            if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled &&
+                (src == null || dst == null))
             {
-                // NEOV2-COSMIC2: um dos buffers nao existe no backend (a criacao falhou, ex.: ~3 GB no
-                // Marvel Cosmic Invasion). Antes isso dava NullReferenceException na thread do renderer.
                 return;
             }
 

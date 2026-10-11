@@ -75,10 +75,6 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             private readonly Dictionary<LsKey, Dictionary<uint, SearchResult>> _sharedEntries;
             private readonly HelperFunctionManager _hfm;
 
-            // NEOV2-GMEMFB1: NVN driver storage buffers (constant buffer 0) the shader reads, used as runtime
-            // targets for global memory accesses whose base address could not be traced.
-            public List<uint> NvnFallbackTargets { get; set; }
-
             public GtsContext(HelperFunctionManager hfm)
             {
                 _entries = [];
@@ -219,11 +215,6 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         {
             GtsContext gtsContext = new(hfm);
 
-            if (gpuAccessor.QueryGlobalMemoryFallbackEnabled())
-            {
-                gtsContext.NvnFallbackTargets = CollectNvnFallbackTargets(blocks, resourceManager);
-            }
-
             foreach (BasicBlock block in blocks)
             {
                 for (LinkedListNode<INode> node = block.Operations.First; node != null; node = node.Next)
@@ -285,122 +276,6 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     }
                 }
             }
-        }
-
-        /// <summary>
-        /// NEOV2-GMEMFB1: finds the NVN storage buffer descriptors (constant buffer 0) read by the shader.
-        /// Offsets are the ones Eden uses (collect_shader_info_pass.cpp), in 32-bit words.
-        /// </summary>
-        private static List<uint> CollectNvnFallbackTargets(BasicBlock[] blocks, ResourceManager resourceManager)
-        {
-            // Eden places the NVN storage buffer descriptors at a different base for each stage
-            // (collect_shader_info_pass.cpp); the previous Ryujinx code used 0x110 for every graphics stage
-            // and 0x310 for compute. Accept both: a descriptor counts when its address words are read.
-            int edenBase = resourceManager.Stage switch
-            {
-                ShaderStage.Vertex => 0x110 / 4,
-                ShaderStage.TessellationControl => 0x210 / 4,
-                ShaderStage.TessellationEvaluation => 0x310 / 4,
-                ShaderStage.Geometry => 0x410 / 4,
-                ShaderStage.Fragment => 0x510 / 4,
-                ShaderStage.Compute => 0x310 / 4,
-                _ => -1,
-            };
-
-            if (edenBase < 0)
-            {
-                return null;
-            }
-
-            int ryujinxBase = resourceManager.Stage == ShaderStage.Compute ? 0x310 / 4 : 0x110 / 4;
-
-            const int DescriptorWords = 4;
-            const int DescriptorCount = 16;
-            const int AreaStart = 0x110 / 4;
-            const int AreaEnd = 0x610 / 4;
-            const int MaxTargets = 12;
-
-            HashSet<int> reads = new();
-            bool dynamicRead = false;
-
-            foreach (BasicBlock block in blocks)
-            {
-                for (LinkedListNode<INode> node = block.Operations.First; node != null; node = node.Next)
-                {
-                    if (node.Value is not Operation operation)
-                    {
-                        continue;
-                    }
-
-                    if (operation.Inst == Instruction.Load &&
-                        operation.StorageKind == StorageKind.ConstantBuffer &&
-                        operation.SourcesCount >= 1 &&
-                        operation.GetSource(0).Type == OperandType.Constant &&
-                        resourceManager.TryGetConstantBufferSlot(operation.GetSource(0).Value, out int loadSlot) &&
-                        loadSlot == DriverReservedCb)
-                    {
-                        dynamicRead = true;
-                        continue;
-                    }
-
-                    for (int index = 0; index < operation.SourcesCount; index++)
-                    {
-                        Operand source = operation.GetSource(index);
-
-                        if (source.Type == OperandType.ConstantBuffer && source.GetCbufSlot() == DriverReservedCb)
-                        {
-                            reads.Add(source.GetCbufOffset());
-                        }
-                    }
-                }
-            }
-
-            List<uint> targets = new();
-            HashSet<int> added = new();
-
-            void TryAdd(int offset, bool force)
-            {
-                if (targets.Count >= MaxTargets || offset < AreaStart || offset >= AreaEnd || !added.Add(offset))
-                {
-                    return;
-                }
-
-                if (force || reads.Contains(offset) || reads.Contains(offset + 1))
-                {
-                    targets.Add(PackCbSlotAndOffset(DriverReservedCb, offset));
-                }
-                else
-                {
-                    added.Remove(offset);
-                }
-            }
-
-            // Preference: Eden's base for this stage, then the Ryujinx base, then any other driver descriptor read.
-            for (int index = 0; index < DescriptorCount; index++)
-            {
-                TryAdd(edenBase + index * DescriptorWords, false);
-            }
-
-            for (int index = 0; index < DescriptorCount; index++)
-            {
-                TryAdd(ryujinxBase + index * DescriptorWords, false);
-            }
-
-            for (int offset = AreaStart; offset < AreaEnd; offset += DescriptorWords)
-            {
-                TryAdd(offset, false);
-            }
-
-            if (targets.Count == 0 && dynamicRead)
-            {
-                // Dynamically indexed reads of constant buffer 0 may read any descriptor of this stage.
-                for (int index = 0; index < DescriptorCount / 2; index++)
-                {
-                    TryAdd(ryujinxBase + index * DescriptorWords, true);
-                }
-            }
-
-            return targets;
         }
 
         private static bool IsGlobalMemory(StorageKind storageKind)
@@ -777,19 +652,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             targetCbs.Sort();
 
-            if (targetCbs.Count == 0 && gtsContext.NvnFallbackTargets != null && gtsContext.NvnFallbackTargets.Count != 0)
-            {
-                // NEOV2-GMEMFB1: same as Eden (DefineGlobalMemoryFunctions): compare the address against every NVN
-                // storage buffer the shader reads and access the one that contains it, instead of reading zero.
-                targetCbs.AddRange(gtsContext.NvnFallbackTargets);
-
-            }
-
             if (targetCbs.Count == 0)
             {
                 gpuAccessor.Log($"Failed to find storage buffer for global memory operation \"{operation.Inst}\".");
-
-
             }
 
             if (gtsContext.TryGetFunctionId(operation, isMultiTarget: true, targetCbs, out functionId))

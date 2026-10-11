@@ -105,13 +105,16 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             }
         }
 
-        // NEOV2-VP9SIMD1: caminho vetorial para ARM64 (NEON) dos filtros de 8 taps do VP9.
-        // O x86 ja usa SSE4.1/AVX2; no ARM o decodificador caia no laco escalar.
-        // Calcula 8 pixels por vez com a mesma aritmetica do caminho escalar:
-        // soma em 32 bits, arredondamento (soma + 64) >> 7 e saturacao em 0..255.
         private readonly struct NeonTaps
         {
-            public readonly Vector128<short> T0, T1, T2, T3, T4, T5, T6, T7;
+            public readonly Vector128<short> T0;
+            public readonly Vector128<short> T1;
+            public readonly Vector128<short> T2;
+            public readonly Vector128<short> T3;
+            public readonly Vector128<short> T4;
+            public readonly Vector128<short> T5;
+            public readonly Vector128<short> T6;
+            public readonly Vector128<short> T7;
 
             public NeonTaps(ref Array8<short> filter)
             {
@@ -129,60 +132,139 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static unsafe Vector128<short> NeonLoad8(byte* src)
         {
-            Vector128<byte> bytes = Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(src)).AsByte();
+            Vector128<byte> bytes =
+                Vector128.CreateScalarUnsafe(
+                    Unsafe.ReadUnaligned<ulong>(src)).AsByte();
 
             return Vector128.WidenLower(bytes).AsInt16();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static void NeonAccumulate(Vector128<short> pixels, Vector128<short> tap, ref Vector128<int> lo, ref Vector128<int> hi)
+        private static void NeonAccumulate(
+            Vector128<short> pixels,
+            Vector128<short> tap,
+            ref Vector128<int> lo,
+            ref Vector128<int> hi)
         {
-            // |pixel * tap| <= 255 * 128, cabe em 16 bits; a soma e feita em 32 bits.
             Vector128<short> product = pixels * tap;
+
             lo += Vector128.WidenLower(product);
             hi += Vector128.WidenUpper(product);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static unsafe Vector128<ushort> NeonFilter8(byte* src, nint step, in NeonTaps taps)
+        private static unsafe Vector128<ushort> NeonFilter8(
+            byte* src,
+            nint step,
+            in NeonTaps taps)
         {
-            Vector128<int> round = Vector128.Create(1 << (FilterBits - 1));
+            Vector128<int> round =
+                Vector128.Create(1 << (FilterBits - 1));
+
             Vector128<int> lo = round;
             Vector128<int> hi = round;
 
-            NeonAccumulate(NeonLoad8(src), taps.T0, ref lo, ref hi);
-            NeonAccumulate(NeonLoad8(src + step), taps.T1, ref lo, ref hi);
-            NeonAccumulate(NeonLoad8(src + (step * 2)), taps.T2, ref lo, ref hi);
-            NeonAccumulate(NeonLoad8(src + (step * 3)), taps.T3, ref lo, ref hi);
-            NeonAccumulate(NeonLoad8(src + (step * 4)), taps.T4, ref lo, ref hi);
-            NeonAccumulate(NeonLoad8(src + (step * 5)), taps.T5, ref lo, ref hi);
-            NeonAccumulate(NeonLoad8(src + (step * 6)), taps.T6, ref lo, ref hi);
-            NeonAccumulate(NeonLoad8(src + (step * 7)), taps.T7, ref lo, ref hi);
+            NeonAccumulate(
+                NeonLoad8(src),
+                taps.T0,
+                ref lo,
+                ref hi);
 
-            lo = Vector128.ShiftRightArithmetic(lo, FilterBits);
-            hi = Vector128.ShiftRightArithmetic(hi, FilterBits);
+            NeonAccumulate(
+                NeonLoad8(src + step),
+                taps.T1,
+                ref lo,
+                ref hi);
 
-            Vector128<int> zero = Vector128<int>.Zero;
-            Vector128<int> max = Vector128.Create(255);
-            lo = Vector128.Min(Vector128.Max(lo, zero), max);
-            hi = Vector128.Min(Vector128.Max(hi, zero), max);
+            NeonAccumulate(
+                NeonLoad8(src + step * 2),
+                taps.T2,
+                ref lo,
+                ref hi);
 
-            return Vector128.Narrow(lo.AsUInt32(), hi.AsUInt32());
+            NeonAccumulate(
+                NeonLoad8(src + step * 3),
+                taps.T3,
+                ref lo,
+                ref hi);
+
+            NeonAccumulate(
+                NeonLoad8(src + step * 4),
+                taps.T4,
+                ref lo,
+                ref hi);
+
+            NeonAccumulate(
+                NeonLoad8(src + step * 5),
+                taps.T5,
+                ref lo,
+                ref hi);
+
+            NeonAccumulate(
+                NeonLoad8(src + step * 6),
+                taps.T6,
+                ref lo,
+                ref hi);
+
+            NeonAccumulate(
+                NeonLoad8(src + step * 7),
+                taps.T7,
+                ref lo,
+                ref hi);
+
+            lo = Vector128.ShiftRightArithmetic(
+                lo,
+                FilterBits);
+
+            hi = Vector128.ShiftRightArithmetic(
+                hi,
+                FilterBits);
+
+            Vector128<int> zero =
+                Vector128<int>.Zero;
+
+            Vector128<int> max =
+                Vector128.Create(255);
+
+            lo = Vector128.Min(
+                Vector128.Max(lo, zero),
+                max);
+
+            hi = Vector128.Min(
+                Vector128.Max(hi, zero),
+                max);
+
+            return Vector128.Narrow(
+                lo.AsUInt32(),
+                hi.AsUInt32());
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static unsafe void NeonStore8(byte* dst, Vector128<ushort> value, bool average)
+        private static unsafe void NeonStore8(
+            byte* dst,
+            Vector128<ushort> value,
+            bool average)
         {
             if (average)
             {
-                // (dst + valor + 1) >> 1, igual a RoundPowerOfTwo(dst + valor, 1).
-                Vector128<ushort> previous = Vector128.WidenLower(
-                    Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(dst)).AsByte());
-                value = (previous + value + Vector128.Create((ushort)1)) >> 1;
+                Vector128<ushort> previous =
+                    Vector128.WidenLower(
+                        Vector128.CreateScalarUnsafe(
+                            Unsafe.ReadUnaligned<ulong>(dst))
+                        .AsByte());
+
+                value =
+                    (previous +
+                     value +
+                     Vector128.Create((ushort)1)) >> 1;
             }
 
-            Vector128<byte> packed = Vector128.Narrow(value, value);
-            Unsafe.WriteUnaligned(dst, packed.AsUInt64().ToScalar());
+            Vector128<byte> packed =
+                Vector128.Narrow(value, value);
+
+            Unsafe.WriteUnaligned(
+                dst,
+                packed.AsUInt64().ToScalar());
         }
 
         private static unsafe void ConvolveHorizNeon(
@@ -196,8 +278,9 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             int h,
             bool average)
         {
-            // Com passo de 16 (sem escala), filtro e deslocamento sao constantes no bloco.
-            NeonTaps taps = new(ref xFilters[x0Q4 & SubpelMask]);
+            NeonTaps taps =
+                new(ref xFilters[x0Q4 & SubpelMask]);
+
             src -= (SubpelTaps / 2) - 1;
             src += x0Q4 >> SubpelBits;
 
@@ -205,7 +288,13 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             {
                 for (int x = 0; x < w; x += 8)
                 {
-                    NeonStore8(&dst[x], NeonFilter8(&src[x], 1, in taps), average);
+                    NeonStore8(
+                        &dst[x],
+                        NeonFilter8(
+                            &src[x],
+                            1,
+                            in taps),
+                        average);
                 }
 
                 src += srcStride;
@@ -224,15 +313,27 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             int h,
             bool average)
         {
-            NeonTaps taps = new(ref yFilters[y0Q4 & SubpelMask]);
-            src -= srcStride * ((SubpelTaps / 2) - 1);
-            src += (y0Q4 >> SubpelBits) * srcStride;
+            NeonTaps taps =
+                new(ref yFilters[y0Q4 & SubpelMask]);
+
+            src -= srcStride *
+                ((SubpelTaps / 2) - 1);
+
+            src +=
+                (y0Q4 >> SubpelBits) *
+                srcStride;
 
             for (int y = 0; y < h; ++y)
             {
                 for (int x = 0; x < w; x += 8)
                 {
-                    NeonStore8(&dst[x], NeonFilter8(&src[x], srcStride, in taps), average);
+                    NeonStore8(
+                        &dst[x],
+                        NeonFilter8(
+                            &src[x],
+                            srcStride,
+                            in taps),
+                        average);
                 }
 
                 src += srcStride;
@@ -241,9 +342,14 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static bool UseNeon(int stepQ4, int w)
+        private static bool UseNeon(
+            int stepQ4,
+            int w)
         {
-            return AdvSimd.IsSupported && UseIntrinsics && stepQ4 == 1 << SubpelBits && (w & 7) == 0;
+            return AdvSimd.IsSupported &&
+                   UseIntrinsics &&
+                   stepQ4 == 1 << SubpelBits &&
+                   (w & 7) == 0;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -266,7 +372,17 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
 
             if (UseNeon(xStepQ4, w))
             {
-                ConvolveHorizNeon(src, srcStride, dst, dstStride, xFilters, x0Q4, w, h, false);
+                ConvolveHorizNeon(
+                    src,
+                    srcStride,
+                    dst,
+                    dstStride,
+                    xFilters,
+                    x0Q4,
+                    w,
+                    h,
+                    false);
+
                 return;
             }
 
@@ -307,7 +423,17 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
         {
             if (UseNeon(xStepQ4, w))
             {
-                ConvolveHorizNeon(src, srcStride, dst, dstStride, xFilters, x0Q4, w, h, true);
+                ConvolveHorizNeon(
+                    src,
+                    srcStride,
+                    dst,
+                    dstStride,
+                    xFilters,
+                    x0Q4,
+                    w,
+                    h,
+                    true);
+
                 return;
             }
 
@@ -424,7 +550,17 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
 
             if (UseNeon(yStepQ4, w))
             {
-                ConvolveVertNeon(src, srcStride, dst, dstStride, yFilters, y0Q4, w, h, false);
+                ConvolveVertNeon(
+                    src,
+                    srcStride,
+                    dst,
+                    dstStride,
+                    yFilters,
+                    y0Q4,
+                    w,
+                    h,
+                    false);
+
                 return;
             }
 
@@ -465,7 +601,17 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
         {
             if (UseNeon(yStepQ4, w))
             {
-                ConvolveVertNeon(src, srcStride, dst, dstStride, yFilters, y0Q4, w, h, true);
+                ConvolveVertNeon(
+                    src,
+                    srcStride,
+                    dst,
+                    dstStride,
+                    yFilters,
+                    y0Q4,
+                    w,
+                    h,
+                    true);
+
                 return;
             }
 

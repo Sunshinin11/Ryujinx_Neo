@@ -129,6 +129,14 @@ namespace Ryujinx.HLE.HOS.Services
                     _parameters[0] = context;
                     
                     result = (ResultCode)processRequest.Invoke(service, _parameters)!;
+
+                    // GALAXY-IPC-FAIL-DIAG20
+                    if (result != ResultCode.Success)
+                    {
+                        Logger.Error?.Print(
+                            LogClass.KernelIpc,
+                            $"[GALAXY-IPC-FAIL] type=CMIF service={service.GetType().FullName} cmd={commandId} method={processRequest.Name} result=0x{System.Convert.ToUInt64(result):X8} ({result})");
+                    }
                 }
                 else
                 {
@@ -184,6 +192,14 @@ namespace Ryujinx.HLE.HOS.Services
                     _parameters[0] = context;
                     
                     result = (ResultCode)processRequest.Invoke(this, _parameters)!;
+
+                    // GALAXY-IPC-FAIL-DIAG20
+                    if (result != ResultCode.Success)
+                    {
+                        Logger.Error?.Print(
+                            LogClass.KernelIpc,
+                            $"[GALAXY-IPC-FAIL] type=TIPC service={GetType().FullName} cmd={commandId} method={processRequest.Name} result=0x{System.Convert.ToUInt64(result):X8} ({result})");
+                    }
                 }
                 else
                 {

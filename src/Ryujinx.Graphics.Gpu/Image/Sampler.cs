@@ -37,6 +37,14 @@ namespace Ryujinx.Graphics.Gpu.Image
         {
             IsSrgb = descriptor.UnpackSrgb();
 
+            // TOTK-E37 (diag): Maxwell sampler reduction filter (min/max) is not forwarded to the host.
+            if (Ryujinx.Graphics.Gpu.Engine.TotkDiagE12.Enabled && descriptor.UnpackReductionFilter() != ReductionFilter.Average)
+            {
+                Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu,
+                    $"[TOTK-E37] reduction={descriptor.UnpackReductionFilter()} min={descriptor.UnpackMinFilter()} mag={descriptor.UnpackMagFilter()} " +
+                    $"addr={descriptor.UnpackAddressU()}/{descriptor.UnpackAddressV()} cmp={descriptor.UnpackCompareMode()} lod=[{descriptor.UnpackMinLod()},{descriptor.UnpackMaxLod()}]");
+            }
+
             MinFilter minFilter = descriptor.UnpackMinFilter();
             MagFilter magFilter = descriptor.UnpackMagFilter();
 

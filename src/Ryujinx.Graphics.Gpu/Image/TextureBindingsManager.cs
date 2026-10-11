@@ -67,6 +67,9 @@ namespace Ryujinx.Graphics.Gpu.Image
 
         private int _lastFragmentTotal;
 
+        // GALAXY-FRAG-BIND-DIAG12
+        private int _galaxyFragBindDiagCount;
+
         /// <summary>
         /// Constructs a new instance of the texture bindings manager.
         /// </summary>
@@ -494,6 +497,30 @@ namespace Ryujinx.Graphics.Gpu.Image
                     // The texture is already bound.
                     state.CachedTexture.SynchronizeMemory();
 
+                    // GALAXY-FRAG-BIND-DIAG12
+                    if (stage == ShaderStage.Fragment && _galaxyFragBindDiagCount < 120)
+                    {
+                        Texture galaxyTexture = state.CachedTexture;
+                        int galaxyN = ++_galaxyFragBindDiagCount;
+
+                        System.IO.File.AppendAllText(
+                            "/tmp/galaxy-frag-bind-diag12.log",
+                            $"CACHE n={galaxyN} " +
+                            $"index={index}/{textureCount} " +
+                            $"set={bindingInfo.Set} binding={bindingInfo.Binding} " +
+                            $"target={bindingInfo.Target} flags={usageFlags} " +
+                            $"cbuf={bindingInfo.CbufSlot} handle=0x{bindingInfo.Handle:X} " +
+                            $"packed=0x{packedId:X} texId={textureId} samplerId={samplerId} " +
+                            $"gpuVA=0x{galaxyTexture.Info.GpuAddress:X} " +
+                            $"tex={galaxyTexture.Info.Width}x{galaxyTexture.Info.Height} " +
+                            $"host={galaxyTexture.HostTexture.Width}x{galaxyTexture.HostTexture.Height} " +
+                            $"format={galaxyTexture.Info.FormatInfo.Format} " +
+                            $"guestTarget={galaxyTexture.Target} " +
+                            $"seq={galaxyTexture.Group.ModifiedSequence} " +
+                            $"invalidSeq={galaxyTexture.InvalidatedSequence}" +
+                            Environment.NewLine);
+                    }
+
                     if ((usageFlags & TextureUsageFlags.NeedsScaleValue) != 0 &&
                         UpdateScale(state.CachedTexture, usageFlags, index, stage))
                     {
@@ -513,6 +540,44 @@ namespace Ryujinx.Graphics.Gpu.Image
                 Sampler sampler = samplerPool?.Get(samplerId);
 
                 ref readonly TextureDescriptor descriptor = ref texturePool.GetForBinding(textureId, sampler?.IsSrgb ?? true, out Texture texture);
+
+                // GALAXY-FRAG-BIND-DIAG12
+                if (stage == ShaderStage.Fragment && _galaxyFragBindDiagCount < 120)
+                {
+                    int galaxyN = ++_galaxyFragBindDiagCount;
+
+                    if (texture != null)
+                    {
+                        System.IO.File.AppendAllText(
+                            "/tmp/galaxy-frag-bind-diag12.log",
+                            $"NEW n={galaxyN} " +
+                            $"index={index}/{textureCount} " +
+                            $"set={bindingInfo.Set} binding={bindingInfo.Binding} " +
+                            $"target={bindingInfo.Target} flags={usageFlags} " +
+                            $"cbuf={bindingInfo.CbufSlot} handle=0x{bindingInfo.Handle:X} " +
+                            $"packed=0x{packedId:X} texId={textureId} samplerId={samplerId} " +
+                            $"gpuVA=0x{texture.Info.GpuAddress:X} " +
+                            $"tex={texture.Info.Width}x{texture.Info.Height} " +
+                            $"host={texture.HostTexture.Width}x{texture.HostTexture.Height} " +
+                            $"format={texture.Info.FormatInfo.Format} " +
+                            $"guestTarget={texture.Target} " +
+                            $"seq={texture.Group.ModifiedSequence} " +
+                            $"invalidSeq={texture.InvalidatedSequence}" +
+                            Environment.NewLine);
+                    }
+                    else
+                    {
+                        System.IO.File.AppendAllText(
+                            "/tmp/galaxy-frag-bind-diag12.log",
+                            $"NULL n={galaxyN} " +
+                            $"index={index}/{textureCount} " +
+                            $"set={bindingInfo.Set} binding={bindingInfo.Binding} " +
+                            $"target={bindingInfo.Target} flags={usageFlags} " +
+                            $"cbuf={bindingInfo.CbufSlot} handle=0x{bindingInfo.Handle:X} " +
+                            $"packed=0x{packedId:X} texId={textureId} samplerId={samplerId}" +
+                            Environment.NewLine);
+                    }
+                }
 
                 specStateMatches &= specState.MatchesTexture(stage, index, descriptor);
 
@@ -841,6 +906,17 @@ namespace Ryujinx.Graphics.Gpu.Image
         {
             _samplerPool = null;
             _texturePool = null;
+        }
+
+        // GALAXY-EXACT-BIND-DIAG13
+        public Texture GetCachedTextureForBinding(int binding)
+        {
+            if ((uint)binding >= (uint)_textureState.Length)
+            {
+                return null;
+            }
+
+            return _textureState[binding].CachedTexture;
         }
 
         /// <summary>

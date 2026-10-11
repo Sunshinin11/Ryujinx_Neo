@@ -1,4 +1,5 @@
 using Ryujinx.Graphics.Device;
+using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Gpu.Engine.InlineToMemory;
 using Ryujinx.Graphics.Gpu.Engine.Threed;
 using Ryujinx.Graphics.Gpu.Engine.Types;
@@ -89,6 +90,158 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
         /// Performs the compute dispatch operation.
         /// </summary>
         /// <param name="argument">Method call argument</param>
+        // DISPATCH-TRACE-E6: env-gated compute dispatch trace (RYUJINX_TOTK_DISPATCH_TRACE=1).
+        private static readonly bool _dispatchTraceE6 =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_DISPATCH_TRACE") == "1";
+
+        private static readonly string _dispatchDumpDirE6 =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_DISPATCH_DUMP_DIR");
+
+        private static readonly Dictionary<string, int> _dispatchSeenE6 = new();
+
+        // TILEDUMP-E7: when the trigger file exists, read back (tracked, GPU-synced) the storage buffers
+        // used by the TOTK tile depth passes right after they are dispatched, then remove the trigger.
+        private readonly List<(int Slot, ulong Va, uint Size)> _tileDumpSbE7 = new();
+        private static readonly string _tileDumpDirE7 =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_TILEDUMP_DIR");
+        private static long _tileDumpLastCheckE7;
+        private static bool _tileDumpArmedE7;
+        private static int _tileDumpSeqE7;
+
+        private static string GuestHashE7(CachedShaderProgram cs)
+        {
+            byte[] code = cs?.Shaders?[0]?.Code;
+            return code != null
+                ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(code)).Substring(0, 16).ToLowerInvariant()
+                : "nocode";
+        }
+
+        private void TileDumpE7(CachedShaderProgram cs, ComputeQmd qmd)
+        {
+            if (string.IsNullOrEmpty(_tileDumpDirE7))
+            {
+                return;
+            }
+
+            string trigger = System.IO.Path.Combine(_tileDumpDirE7, "dump-now");
+
+            long now = Environment.TickCount64;
+            if (!_tileDumpArmedE7)
+            {
+                if (now - _tileDumpLastCheckE7 < 500)
+                {
+                    return;
+                }
+
+                _tileDumpLastCheckE7 = now;
+                _tileDumpArmedE7 = System.IO.File.Exists(trigger);
+
+                if (!_tileDumpArmedE7)
+                {
+                    return;
+                }
+            }
+
+            string hash = GuestHashE7(cs);
+            bool isDepthTiles = hash == "a725974a07350e36";
+            bool isMaxTiles = hash == "a4f14e4792099b76";
+
+            if (!isDepthTiles && !isMaxTiles)
+            {
+                return;
+            }
+
+            try
+            {
+                int seq = ++_tileDumpSeqE7;
+                var meta = new System.Text.StringBuilder();
+                meta.AppendLine($"seq={seq} hash={hash} grid={qmd.CtaRasterWidth}x{qmd.CtaRasterHeight}x{qmd.CtaRasterDepth} block={qmd.CtaThreadDimension0}x{qmd.CtaThreadDimension1}x{qmd.CtaThreadDimension2} time={DateTime.Now:O}");
+
+                for (int i = 0; i < Constants.TotalCpUniformBuffers; i++)
+                {
+                    if (!qmd.ConstantBufferValid(i))
+                    {
+                        continue;
+                    }
+
+                    ulong cbVa = (uint)qmd.ConstantBufferAddrLower(i) | (ulong)qmd.ConstantBufferAddrUpper(i) << 32;
+                    int cbSize = Math.Min(qmd.ConstantBufferSize(i), 0x10000);
+                    byte[] cbData = _channel.MemoryManager.GetSpan(cbVa, cbSize, tracked: true).ToArray();
+                    System.IO.File.WriteAllBytes(System.IO.Path.Combine(_tileDumpDirE7, $"{seq:D2}_{hash}_cb{i}.bin"), cbData);
+                    meta.AppendLine($"cb{i} va=0x{cbVa:X} size={cbSize}");
+                }
+
+                foreach ((int slot, ulong va, uint size) in _tileDumpSbE7)
+                {
+                    int dumpSize = (int)Math.Min(size, 4u * 1024 * 1024);
+                    byte[] data = _channel.MemoryManager.GetSpan(va, dumpSize, tracked: true).ToArray();
+                    System.IO.File.WriteAllBytes(System.IO.Path.Combine(_tileDumpDirE7, $"{seq:D2}_{hash}_sb{slot}.bin"), data);
+                    meta.AppendLine($"sb{slot} va=0x{va:X} size={size} dumped={dumpSize}");
+                }
+
+                System.IO.File.WriteAllText(System.IO.Path.Combine(_tileDumpDirE7, $"{seq:D2}_{hash}_meta.txt"), meta.ToString());
+
+                Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[TOTK-TILEDUMP-E7] {meta.ToString().Replace(Environment.NewLine, " | ")}");
+
+                if (isMaxTiles)
+                {
+                    // a4f14e runs after a725 in the frame: one dump pair per trigger.
+                    _tileDumpArmedE7 = false;
+                    System.IO.File.Delete(trigger);
+                }
+            }
+            catch (Exception ex)
+            {
+                _tileDumpArmedE7 = false;
+                Ryujinx.Common.Logging.Logger.Error?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[TOTK-TILEDUMP-E7] failed: {ex.Message}");
+            }
+        }
+        private static readonly HashSet<string> _dispatchDumpedE6 = new();
+
+        private static void TraceDispatchE6(CachedShaderProgram cs, ulong shaderGpuVa, ComputeQmd qmd, int sharedMemorySize, int localMemorySize)
+        {
+            if (!_dispatchTraceE6 || cs?.Shaders == null || cs.Shaders.Length == 0 || cs.Shaders[0] == null)
+            {
+                return;
+            }
+
+            byte[] code = cs.Shaders[0].Code;
+            string hash = code != null
+                ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(code)).Substring(0, 16).ToLowerInvariant()
+                : "nocode";
+
+            string key = $"{hash} grid={qmd.CtaRasterWidth}x{qmd.CtaRasterHeight}x{qmd.CtaRasterDepth} block={qmd.CtaThreadDimension0}x{qmd.CtaThreadDimension1}x{qmd.CtaThreadDimension2}";
+
+            lock (_dispatchSeenE6)
+            {
+                _dispatchSeenE6.TryGetValue(key, out int count);
+                _dispatchSeenE6[key] = count + 1;
+
+                if (count != 0)
+                {
+                    return;
+                }
+
+                ShaderProgramInfo info = cs.Shaders[0].Info;
+
+                Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu,
+                    $"[TOTK-DISPATCH-E6] CS={key} va=0x{shaderGpuVa:X} smem={sharedMemorySize} lmem={localMemorySize} " +
+                    $"cb={info.CBuffers.Count} sb={info.SBuffers.Count} tex={info.Textures.Count} img={info.Images.Count} codeLen={code?.Length ?? 0}");
+
+                if (!string.IsNullOrEmpty(_dispatchDumpDirE6) && code != null && _dispatchDumpedE6.Add(hash))
+                {
+                    try
+                    {
+                        System.IO.Directory.CreateDirectory(_dispatchDumpDirE6);
+                        System.IO.File.WriteAllBytes(System.IO.Path.Combine(_dispatchDumpDirE6, $"cs_{hash}.bin"), code);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+        }
+
         private void SendSignalingPcasB(int argument)
         {
             MemoryManager memoryManager = _channel.MemoryManager;
@@ -144,6 +297,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
 
             CachedShaderProgram cs = memoryManager.Physical.ShaderCache.GetComputeShader(_channel, samplerPoolMaximumId, poolState, computeState, shaderGpuVa);
 
+            GraphicsCompatibility.RegisterMua3Program(cs.HostProgram, new Mua3ShaderIdentity(0, shaderGpuVa, 0, 0, 0, 0));
+
             _context.Renderer.Pipeline.SetProgram(cs.HostProgram);
 
             _channel.TextureManager.SetComputeSamplerPool(samplerPoolGpuVa, _state.State.SetTexSamplerPoolCMaximumIndex, qmd.SamplerIndex);
@@ -152,16 +307,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
 
             ShaderProgramInfo info = cs.Shaders[0].Info;
 
+            _tileDumpSbE7.Clear();
+
             for (int index = 0; index < info.SBuffers.Count; index++)
             {
                 BufferDescriptor sb = info.SBuffers[index];
-
-                if (TextureArrayFeedback.IsFeedbackBuffer(sb))
-                {
-                    // NEOV2-ARRAYFB1: host buffer, not guest memory.
-                    _channel.BufferManager.SetComputeTextureArrayFeedback(sb.Slot);
-                    continue;
-                }
 
                 ulong sbDescAddress = _channel.BufferManager.GetComputeUniformBufferAddress(sb.SbCbSlot);
                 sbDescAddress += (ulong)sb.SbCbOffset * 4;
@@ -171,6 +321,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
                 uint size = NeoStorageBufferSize.FromDriverDescriptor(_channel.MemoryManager, sbDescriptor, -1, sb.SbCbSlot);
 
                 _channel.BufferManager.SetComputeStorageBuffer(sb.Slot, sbDescriptor.PackAddress(), size, sb.Flags);
+
+                _tileDumpSbE7.Add((sb.Slot, sbDescriptor.PackAddress(), size));
             }
 
             if (_channel.BufferManager.HasUnalignedStorageBuffers != computeState.HasUnalignedStorageBuffer)
@@ -186,6 +338,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
 
                 cs = memoryManager.Physical.ShaderCache.GetComputeShader(_channel, samplerPoolMaximumId, poolState, computeState, shaderGpuVa);
 
+                GraphicsCompatibility.RegisterMua3Program(cs.HostProgram, new Mua3ShaderIdentity(0, shaderGpuVa, 0, 0, 0, 0));
+
                 _context.Renderer.Pipeline.SetProgram(cs.HostProgram);
             }
 
@@ -198,7 +352,18 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
 
             _channel.BufferManager.CommitComputeBindings();
 
-            _context.Renderer.Pipeline.DispatchCompute(qmd.CtaRasterWidth, qmd.CtaRasterHeight, qmd.CtaRasterDepth);
+            TraceDispatchE6(cs, shaderGpuVa, qmd, sharedMemorySize, localMemorySize);
+
+            string csHashE12 = TotkDiagE12.Enabled ? TotkDiagE12.Hash(cs.Shaders[0]?.Code) : null;
+            bool skipE12 = TotkDiagE12.ShouldSkip(csHashE12);
+            TotkDiagE12.Timeline($"DISPATCH cs={csHashE12} grid={qmd.CtaRasterWidth}x{qmd.CtaRasterHeight}x{qmd.CtaRasterDepth} block={qmd.CtaThreadDimension0}x{qmd.CtaThreadDimension1}x{qmd.CtaThreadDimension2} skip={skipE12}");
+
+            if (!skipE12)
+            {
+                _context.Renderer.Pipeline.DispatchCompute(qmd.CtaRasterWidth, qmd.CtaRasterHeight, qmd.CtaRasterDepth);
+            }
+
+            TileDumpE7(cs, qmd);
 
             _3dEngine.ForceShaderUpdate();
         }

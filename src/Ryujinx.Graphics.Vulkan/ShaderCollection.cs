@@ -28,6 +28,22 @@ namespace Ryujinx.Graphics.Vulkan
 
         public uint Stages { get; }
 
+        public string FragmentShaderHash
+        {
+            get
+            {
+                for (int i = 0; i < _shaders.Length; i++)
+                {
+                    if (_shaders[i].StageFlags == ShaderStageFlags.FragmentBit)
+                    {
+                        return _shaders[i].CodeHash;
+                    }
+                }
+
+                return null;
+            }
+        }
+
         public PipelineStageFlags IncoherentBufferWriteStages { get; }
         public PipelineStageFlags IncoherentTextureWriteStages { get; }
 
@@ -120,7 +136,7 @@ namespace Ryujinx.Graphics.Vulkan
                 _gd.Capabilities.SupportsPushDescriptors &&
                 !IsCompute &&
                 !HasPushDescriptorsBug(gd) &&
-                (!Ryujinx.Common.Diagnostics.NeoGraphicsSettings.HugareOptimizationsEnabled || !gd.IsTurnip) &&
+                !gd.IsTurnip &&
                 CanUsePushDescriptors(gd, resourceLayout, IsCompute);
 
             ReadOnlyCollection<ResourceDescriptorCollection> sets = usePushDescriptors ?
@@ -132,7 +148,7 @@ namespace Ryujinx.Graphics.Vulkan
             UsePushDescriptors = usePushDescriptors;
 
             Stages = stages;
-            bool hasBatchedTextureSamplerBug = Ryujinx.Common.Diagnostics.NeoGraphicsSettings.HugareOptimizationsEnabled && gd.Vendor == Vendor.Qualcomm;
+            bool hasBatchedTextureSamplerBug = gd.Vendor == Vendor.Qualcomm;
 
             ClearSegments = BuildClearSegments(sets);
             BindingSegments = BuildBindingSegments(resourceLayout.SetUsages, hasBatchedTextureSamplerBug, out bool usesBufferTextures);

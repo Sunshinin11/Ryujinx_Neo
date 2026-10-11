@@ -1,29 +1,39 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <!-- Cartridge Body -->
+    android:viewportWidth="1720"
+    android:viewportHeight="1720">
+  <group android:scaleX="0.42166665"
+      android:scaleY="0.42166665"
+      android:translateX="497.36667"
+      android:translateY="497.36667">
     <path
-        android:pathData="M 38,25 C 34.1,25 31,28.1 31,32 L 31,76 C 31,79.9 34.1,83 38,83 L 70,83 C 73.9,83 77,79.9 77,76 L 77,32 C 77,28.1 73.9,25 70,25 L 63,25 C 62.5,27.5 60.5,29 58,29 L 50,29 C 47.5,29 45.5,27.5 45,25 Z"
-        android:fillColor="#1C1C20"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="2.5"
-        android:strokeLineJoin="round"/>
-    <!-- Cartridge Label Area -->
-    <path
-        android:pathData="M 37,34 C 35.9,34 35,34.9 35,36 L 35,72 C 35,73.1 35.9,74 37,74 L 71,74 C 72.1,74 73,73.1 73,72 L 73,36 C 73,34.9 72.1,34 71,34 Z"
-        android:fillColor="#0D0D10"
-        android:strokeColor="#3F3F46"
-        android:strokeWidth="1"/>
-    <!-- Geometric 'N' Logo -->
-    <path
-        android:pathData="M 43,41 L 48.5,41 L 59.5,58.5 L 59.5,41 L 65,41 L 65,65 L 59.5,65 L 48.5,47.5 L 48.5,65 L 43,65 Z"
-        android:fillColor="#FFFFFF"/>
-    <!-- Cartridge Connector Pins Accent -->
-    <path
-        android:pathData="M 47,78 L 61,78"
-        android:strokeColor="#71717A"
-        android:strokeWidth="1.5"
+        android:pathData="m1260,1060h-800"
+        android:strokeLineJoin="round"
+        android:strokeWidth="120"
+        android:fillColor="#1f99be"
+        android:strokeColor="#1f99be"
         android:strokeLineCap="round"/>
+    <path
+        android:pathData="m1260,660h-800"
+        android:strokeLineJoin="round"
+        android:strokeWidth="120"
+        android:fillColor="#d5160d"
+        android:strokeColor="#d5160d"
+        android:strokeLineCap="round"/>
+    <path
+        android:pathData="m1160,1660h500v-1400h-544.3l-155.7,1000 155.7,-1000h544.3v1400z"
+        android:strokeLineJoin="round"
+        android:strokeWidth="120"
+        android:fillColor="#45bde1"
+        android:strokeColor="#45bde1"
+        android:strokeLineCap="round"/>
+    <path
+        android:pathData="m560,60h-500v1400h550l150,-1000 -150,1000h-550v-1400z"
+        android:strokeLineJoin="round"
+        android:strokeWidth="120"
+        android:fillColor="#f3433b"
+        android:strokeColor="#f3433b"
+        android:strokeLineCap="round"/>
+  </group>
 </vector>

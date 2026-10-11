@@ -1079,12 +1079,16 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         private static OperationResult GenerateShuffle(CodeGenContext context, AstOperation operation)
         {
-            SpvInstruction value = context.GetFP32(operation.GetSource(0));
-            SpvInstruction index = context.GetU32(operation.GetSource(1));
+            SpvInstruction fpValue = context.GetFP32(operation.GetSource(0));
+            SpvInstruction fpIndex = context.GetU32(operation.GetSource(1));
 
-            SpvInstruction result = context.GroupNonUniformShuffle(context.TypeFP32(), context.Constant(context.TypeU32(), (int)Scope.Subgroup), value, index);
+            SpvInstruction fpResult = context.GroupNonUniformShuffle(
+                context.TypeFP32(),
+                context.Constant(context.TypeU32(), (int)Scope.Subgroup),
+                fpValue,
+                fpIndex);
 
-            return new OperationResult(AggregateType.FP32, result);
+            return new OperationResult(AggregateType.FP32, fpResult);
         }
 
         private static OperationResult GenerateShuffleDown(CodeGenContext context, AstOperation operation)
@@ -1111,9 +1115,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         {
             SpvInstruction value = context.GetFP32(operation.GetSource(0));
             SpvInstruction index = context.GetU32(operation.GetSource(1));
-
             SpvInstruction result = context.GroupNonUniformShuffleXor(context.TypeFP32(), context.Constant(context.TypeU32(), (int)Scope.Subgroup), value, index);
-
             return new OperationResult(AggregateType.FP32, result);
         }
 
@@ -1184,6 +1186,17 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             bool isMultisample = (texOp.Type & SamplerType.Multisample) != 0;
             bool isShadow = (texOp.Type & SamplerType.Shadow) != 0;
 
+            bool totkTapTarget = isShadow &&
+                !isGather &&
+                TotkDiagShared.ShadowTapOne &&
+                TotkDiagShared.IsTapTarget(TotkDiagShared.CurrentGuestHash);
+
+            if (totkTapTarget && TotkDiagShared.ShadowTapMode == "one")
+            {
+                // SHADOWTAP-E17 (diagnostic): depth-compare sample result forced to 1.0 (fully lit).
+                return new OperationResult(AggregateType.FP32, context.Constant(context.TypeFP32(), 1.0f));
+            }
+
             int srcIndex = 0;
 
             SpvInstruction Src(AggregateType type)
@@ -1240,6 +1253,24 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
 
             SpvInstruction pCoords = AssemblePVector(pCount);
+
+            if (isGather && !isShadow && !intCoords && !isArray && pCount == 2 &&
+                TotkDiagShared.ShadowTapOne && TotkDiagShared.ShadowTapMode == "gathersnap" &&
+                TotkDiagShared.IsTapTarget(TotkDiagShared.CurrentGuestHash))
+            {
+                // GATHERSNAP-E39 (diagnostic): round gather coordinates to the nearest 1/256 texel
+                // (NVIDIA-style subtexel rounding) before the 2x2 footprint is selected.
+                SpvInstruction fp32g = context.TypeFP32();
+                SpvInstruction vec2g = context.TypeVector(fp32g, 2);
+                SpvInstruction ivec2g = context.TypeVector(context.TypeS32(), 2);
+                SpvInstruction rawImageG = context.Image(declaration.ImageType, image);
+                SpvInstruction sizeG = context.ConvertSToF(vec2g, context.ImageQuerySizeLod(ivec2g, rawImageG, context.Constant(context.TypeS32(), 0)));
+                SpvInstruction c256 = context.ConstantComposite(vec2g, context.Constant(fp32g, 256f), context.Constant(fp32g, 256f));
+                SpvInstruction cHalf = context.ConstantComposite(vec2g, context.Constant(fp32g, 0.5f), context.Constant(fp32g, 0.5f));
+                SpvInstruction scaleG = context.FMul(vec2g, sizeG, c256);
+                SpvInstruction tG = context.GlslFloor(vec2g, context.FAdd(vec2g, context.FMul(vec2g, pCoords, scaleG), cHalf));
+                pCoords = context.FDiv(vec2g, tG, scaleG);
+            }
 
             SpvInstruction AssembleDerivativesVector(int count)
             {
@@ -1366,6 +1397,18 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 operandsList.Add(lodBias);
             }
 
+            if (totkTapTarget && hasLodLevel && TotkDiagShared.ShadowTapMode == "lod0")
+            {
+                // SHADOWTAP-E23 lod0: keep the depth-compare sample, force explicit LOD 0.
+                lod = context.Constant(context.TypeFP32(), 0f);
+            }
+            else if (totkTapTarget && hasLodLevel && TotkDiagShared.ShadowTapMode == "implicit" &&
+                     context.Definitions.Stage == ShaderStage.Fragment)
+            {
+                // SHADOWTAP-E23 implicit: drop the explicit LOD (implicit-LOD depth-compare sample).
+                hasLodLevel = false;
+            }
+
             if (!isMultisample && hasLodLevel)
             {
                 operandsMask |= ImageOperandsMask.Lod;
@@ -1404,6 +1447,142 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             if (intCoords)
             {
                 image = context.Image(declaration.ImageType, image);
+            }
+
+            if (totkTapTarget && isArray && !intCoords && TotkDiagShared.ShadowTapMode.StartsWith("dbg") && context.TotkDbgVar == null)
+            {
+                // SHADOWTAP-E29 dbg: record (u, v, layer/4, dref) of the first depth-compare tap; written to RT0 later.
+                SpvInstruction fp32d = context.TypeFP32();
+                SpvInstruction vec4d = context.TypeVector(fp32d, 4);
+                SpvInstruction zero4 = context.ConstantComposite(vec4d, context.Constant(fp32d, 0f), context.Constant(fp32d, 0f), context.Constant(fp32d, 0f), context.Constant(fp32d, 0f));
+                context.TotkDbgVar = context.Variable(context.TypePointer(StorageClass.Private, vec4d), StorageClass.Private, zero4);
+                context.AddGlobalVariable(context.TotkDbgVar);
+                SpvInstruction du = context.CompositeExtract(fp32d, pCoords, (SpvLiteralInteger)0);
+                SpvInstruction dv = context.CompositeExtract(fp32d, pCoords, (SpvLiteralInteger)1);
+                SpvInstruction dl = context.FMul(fp32d, context.CompositeExtract(fp32d, pCoords, (SpvLiteralInteger)2), context.Constant(fp32d, 0.25f));
+                                if (TotkDiagShared.ShadowTapMode == "dbgm")
+                {
+                    // SHADOWTAP-E36: margin = dref - stored depth (nearest texel, same u/v/layer), 24-bit signed encoding + layer.
+                    SpvInstruction s32m = context.TypeS32();
+                    SpvInstruction u32m = context.TypeU32();
+                    SpvInstruction ivec3m = context.TypeVector(s32m, 3);
+                    SpvInstruction rawImageM = context.Image(declaration.ImageType, image);
+                    SpvInstruction sizeM = context.ImageQuerySizeLod(ivec3m, rawImageM, context.Constant(s32m, 0));
+                    SpvInstruction oneM = context.Constant(s32m, 1);
+                    SpvInstruction zeroM = context.Constant(s32m, 0);
+                    SpvInstruction wM = context.CompositeExtract(s32m, sizeM, (SpvLiteralInteger)0);
+                    SpvInstruction hM = context.CompositeExtract(s32m, sizeM, (SpvLiteralInteger)1);
+                    SpvInstruction nM = context.CompositeExtract(s32m, sizeM, (SpvLiteralInteger)2);
+                    SpvInstruction lM = context.CompositeExtract(fp32d, pCoords, (SpvLiteralInteger)2);
+                    SpvInstruction ixM = context.GlslSClamp(s32m, context.ConvertFToS(s32m, context.FMul(fp32d, du, context.ConvertSToF(fp32d, wM))), zeroM, context.ISub(s32m, wM, oneM));
+                    SpvInstruction iyM = context.GlslSClamp(s32m, context.ConvertFToS(s32m, context.FMul(fp32d, dv, context.ConvertSToF(fp32d, hM))), zeroM, context.ISub(s32m, hM, oneM));
+                    SpvInstruction ilM = context.GlslSClamp(s32m, context.ConvertFToS(s32m, lM), zeroM, context.ISub(s32m, nM, oneM));
+                    SpvInstruction texelM = context.ImageFetch(vec4d, rawImageM, context.CompositeConstruct(ivec3m, ixM, iyM, ilM), ImageOperandsMask.Lod, zeroM);
+                    SpvInstruction storedM = context.CompositeExtract(fp32d, texelM, (SpvLiteralInteger)0);
+                    SpvInstruction diffM = context.FSub(fp32d, dRef, storedM);
+                    SpvInstruction encF = context.GlslFClamp(fp32d, context.FAdd(fp32d, context.FMul(fp32d, diffM, context.Constant(fp32d, 0.5f)), context.Constant(fp32d, 0.5f)), context.Constant(fp32d, 0f), context.Constant(fp32d, 1f));
+                    SpvInstruction encU = context.ConvertFToU(u32m, context.FAdd(fp32d, context.FMul(fp32d, encF, context.Constant(fp32d, 16777215f)), context.Constant(fp32d, 0.5f)));
+                    SpvInstruction m8M = context.Constant(u32m, 0xFFu);
+                    SpvInstruction inv255M = context.Constant(fp32d, 1f / 255f);
+                    SpvInstruction b2 = context.FMul(fp32d, context.ConvertUToF(fp32d, context.BitwiseAnd(u32m, context.ShiftRightLogical(u32m, encU, context.Constant(u32m, 16u)), m8M)), inv255M);
+                    SpvInstruction b1 = context.FMul(fp32d, context.ConvertUToF(fp32d, context.BitwiseAnd(u32m, context.ShiftRightLogical(u32m, encU, context.Constant(u32m, 8u)), m8M)), inv255M);
+                    SpvInstruction b0 = context.FMul(fp32d, context.ConvertUToF(fp32d, context.BitwiseAnd(u32m, encU, m8M)), inv255M);
+                    SpvInstruction bl = context.FMul(fp32d, context.ConvertSToF(fp32d, ilM), inv255M);
+                    context.Store(context.TotkDbgVar, context.CompositeConstruct(vec4d, b2, b1, b0, bl));
+                }
+                else if (TotkDiagShared.ShadowTapMode == "dbgd" || TotkDiagShared.ShadowTapMode == "dbguv")
+                {
+                    // SHADOWTAP-E35: exact byte encoding for RGBA8 RT0.
+                    // dbgd : (dref*0xFFFFFF bytes hi,mid,lo, layer); dbguv: (u16 hi, u16 lo, v16 hi, v16 lo).
+                    SpvInstruction u32d = context.TypeU32();
+                    SpvInstruction f0 = context.Constant(fp32d, 0f);
+                    SpvInstruction f1 = context.Constant(fp32d, 1f);
+                    SpvInstruction m8 = context.Constant(u32d, 0xFFu);
+                    SpvInstruction inv255 = context.Constant(fp32d, 1f / 255f);
+                    SpvInstruction Byte(SpvInstruction n, uint shift)
+                    {
+                        SpvInstruction sh = shift == 0 ? n : context.ShiftRightLogical(u32d, n, context.Constant(u32d, shift));
+                        return context.FMul(fp32d, context.ConvertUToF(fp32d, context.BitwiseAnd(u32d, sh, m8)), inv255);
+                    }
+                    SpvInstruction Quant(SpvInstruction x, float scale)
+                    {
+                        SpvInstruction c = context.GlslFClamp(fp32d, x, f0, f1);
+                        return context.ConvertFToU(u32d, context.FAdd(fp32d, context.FMul(fp32d, c, context.Constant(fp32d, scale)), context.Constant(fp32d, 0.5f)));
+                    }
+                    SpvInstruction rawL = context.CompositeExtract(fp32d, pCoords, (SpvLiteralInteger)2);
+                    if (TotkDiagShared.ShadowTapMode == "dbgd")
+                    {
+                        SpvInstruction nd = Quant(dRef, 16777215f);
+                        SpvInstruction nl = context.ConvertFToU(u32d, context.GlslFClamp(fp32d, rawL, f0, context.Constant(fp32d, 255f)));
+                        context.Store(context.TotkDbgVar, context.CompositeConstruct(vec4d, Byte(nd, 16), Byte(nd, 8), Byte(nd, 0), Byte(nl, 0)));
+                    }
+                    else
+                    {
+                        SpvInstruction nu = Quant(du, 65535f);
+                        SpvInstruction nv = Quant(dv, 65535f);
+                        context.Store(context.TotkDbgVar, context.CompositeConstruct(vec4d, Byte(nu, 8), Byte(nu, 0), Byte(nv, 8), Byte(nv, 0)));
+                    }
+                }
+                else
+                {
+                    context.Store(context.TotkDbgVar, context.CompositeConstruct(vec4d, du, dv, dl, dRef));
+                }
+            }
+
+            if (totkTapTarget && isArray && !intCoords && hasLodLevel && lod != null && TotkDiagShared.ShadowTapMode == "swaplayer")
+            {
+                // SHADOWTAP-E28 swaplayer: use the explicit-LOD operand as the array layer, LOD 0.
+                SpvInstruction fp32s = context.TypeFP32();
+                SpvInstruction su = context.CompositeExtract(fp32s, pCoords, (SpvLiteralInteger)0);
+                SpvInstruction sv = context.CompositeExtract(fp32s, pCoords, (SpvLiteralInteger)1);
+                pCoords = context.CompositeConstruct(context.TypeVector(fp32s, 3), su, sv, lod);
+                operandsList.Remove(lod);
+                lod = context.Constant(fp32s, 0f);
+                operandsList.Add(lod);
+            }
+
+            if (totkTapTarget && isArray && !intCoords && TotkDiagShared.ShadowTapMode.StartsWith("layer"))
+            {
+                // SHADOWTAP-E27 layerN: keep the hardware depth-compare sample but force the array layer (cascade).
+                int forcedLayer = TotkDiagShared.ShadowTapMode.Length > 5 ? TotkDiagShared.ShadowTapMode[5] - '0' : 0;
+                SpvInstruction fp32l = context.TypeFP32();
+                SpvInstruction lu = context.CompositeExtract(fp32l, pCoords, (SpvLiteralInteger)0);
+                SpvInstruction lv = context.CompositeExtract(fp32l, pCoords, (SpvLiteralInteger)1);
+                pCoords = context.CompositeConstruct(context.TypeVector(fp32l, 3), lu, lv, context.Constant(fp32l, (float)forcedLayer));
+            }
+
+            if (totkTapTarget && isArray && !intCoords && TotkDiagShared.ShadowTapMode.StartsWith("manual"))
+            {
+                // SHADOWTAP-E24 manual: fetch the raw depth texel (same u, v, layer) and compare in the shader,
+                // bypassing the hardware depth-compare sampling path.
+                SpvInstruction fp32 = context.TypeFP32();
+                SpvInstruction s32 = context.TypeS32();
+                SpvInstruction ivec3 = context.TypeVector(s32, 3);
+                SpvInstruction rawImage = context.Image(declaration.ImageType, image);
+                SpvInstruction size = context.ImageQuerySizeLod(ivec3, rawImage, context.Constant(s32, 0));
+                SpvInstruction u = context.CompositeExtract(fp32, pCoords, (SpvLiteralInteger)0);
+                SpvInstruction v = context.CompositeExtract(fp32, pCoords, (SpvLiteralInteger)1);
+                SpvInstruction layer = context.CompositeExtract(fp32, pCoords, (SpvLiteralInteger)2);
+                SpvInstruction w = context.CompositeExtract(s32, size, (SpvLiteralInteger)0);
+                SpvInstruction h = context.CompositeExtract(s32, size, (SpvLiteralInteger)1);
+                SpvInstruction n = context.CompositeExtract(s32, size, (SpvLiteralInteger)2);
+                SpvInstruction one = context.Constant(s32, 1);
+                SpvInstruction zero = context.Constant(s32, 0);
+                SpvInstruction ix = context.ConvertFToS(s32, context.FMul(fp32, u, context.ConvertSToF(fp32, w)));
+                SpvInstruction iy = context.ConvertFToS(s32, context.FMul(fp32, v, context.ConvertSToF(fp32, h)));
+                ix = context.GlslSClamp(s32, ix, zero, context.ISub(s32, w, one));
+                iy = context.GlslSClamp(s32, iy, zero, context.ISub(s32, h, one));
+                SpvInstruction il = context.GlslSClamp(s32, context.ConvertFToS(s32, layer), zero, context.ISub(s32, n, one));
+                SpvInstruction texel = context.ImageFetch(
+                    context.TypeVector(fp32, 4), rawImage, context.CompositeConstruct(ivec3, ix, iy, il),
+                    ImageOperandsMask.Lod, zero);
+                SpvInstruction depth = context.CompositeExtract(fp32, texel, (SpvLiteralInteger)0);
+                SpvInstruction cmp = TotkDiagShared.ShadowTapMode == "manual_ge"
+                    ? context.FOrdGreaterThanEqual(context.TypeBool(), dRef, depth)
+                    : context.FOrdLessThanEqual(context.TypeBool(), dRef, depth);
+                SpvInstruction manual = context.Select(fp32, cmp, context.Constant(fp32, 1f), context.Constant(fp32, 0f));
+
+                return new OperationResult(AggregateType.FP32, manual);
             }
 
             SpvInstruction[] operands = operandsList.ToArray();
@@ -1661,6 +1840,21 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             if (isStore)
             {
+                if (context.TotkDbgVar != null &&
+                    operation.StorageKind == StorageKind.Output &&
+                    operation.SourcesCount == 4 &&
+                    operation.GetSource(0) is AstOperand dbgVar && dbgVar.Type == OperandType.Constant &&
+                    (IoVariable)dbgVar.Value == IoVariable.FragmentOutputColor &&
+                    operation.GetSource(1) is AstOperand dbgLoc && dbgLoc.Type == OperandType.Constant && dbgLoc.Value == 0 &&
+                    operation.GetSource(2) is AstOperand dbgComp && dbgComp.Type == OperandType.Constant &&
+                    varType == AggregateType.FP32)
+                {
+                    // SHADOWTAP-E29 dbg: replace RT0 component with the recorded tap operand.
+                    SpvInstruction dbgVec = context.Load(context.TypeVector(context.TypeFP32(), 4), context.TotkDbgVar);
+                    context.Store(pointer, context.CompositeExtract(context.TypeFP32(), dbgVec, (SpvLiteralInteger)dbgComp.Value));
+                    return OperationResult.Invalid;
+                }
+
                 context.Store(pointer, context.Get(varType, operation.GetSource(operation.SourcesCount - 1)));
                 return OperationResult.Invalid;
             }

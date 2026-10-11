@@ -152,6 +152,12 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// <param name="index">The index of the color buffer to set (up to 8)</param>
         /// <param name="color">The color buffer texture</param>
         /// <returns>True if render target scale must be updated.</returns>
+        // RTDUMP-E18 (diagnostic): current color render target at index.
+        public Texture GetRenderTargetColorE18(int index)
+        {
+            return (uint)index < (uint)_rtColors.Length ? _rtColors[index] : null;
+        }
+
         public bool SetRenderTargetColor(int index, Texture color)
         {
             bool hasValue = color != null;
@@ -334,6 +340,12 @@ namespace Ryujinx.Graphics.Gpu.Image
         public (Texture, Sampler) GetGraphicsTextureAndSampler(int textureId, int samplerId)
         {
             return _gpBindingsManager.GetTextureAndSampler(textureId, samplerId);
+        }
+
+        // GALAXY-EXACT-BIND-DIAG13
+        public Texture GetGraphicsCachedTextureForBinding(int binding)
+        {
+            return _gpBindingsManager.GetCachedTextureForBinding(binding);
         }
 
         /// <summary>

@@ -17,6 +17,7 @@
     </UserControl.Resources>
     <Grid RowDefinitions="*">
         <ListBox
+            Name="GameGridBox"
             Grid.Row="0"
             Padding="8"
             HorizontalAlignment="Stretch"

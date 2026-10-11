@@ -21,10 +21,6 @@ namespace Ryujinx.Graphics.Nvdec.FFmpeg
         {
         }
 
-        /// <param name="sliceThreads">
-        /// NEOV2-VP9EDEN1: como o Eden (ffmpeg.cpp), usa threads por fatia/tile (thread_count = 0, automatico),
-        /// sem threads por quadro, e as flags LOW_DELAY e FAST.
-        /// </param>
         public FFmpegContext(AVCodecID codecId, bool sliceThreads)
         {
             _codec = FFmpegApi.avcodec_find_decoder(codecId);
@@ -175,11 +171,10 @@ namespace Ryujinx.Graphics.Nvdec.FFmpeg
             return result < 0 ? result : 0;
         }
 
-        /// <summary>
-        /// NEOV2-VP9EDEN1: decodifica um pacote sem pedir quadros atrasados. Quadros VP9 ocultos
-        /// nao geram saida (gotFrame = false) e isso nao e erro. Retorna o codigo do FFmpeg (&lt; 0 = erro).
-        /// </summary>
-        public int DecodeFrameNoFlush(Surface output, ReadOnlySpan<byte> bitstream, out bool gotFrame)
+        public int DecodeFrameNoFlush(
+            Surface output,
+            ReadOnlySpan<byte> bitstream,
+            out bool gotFrame)
         {
             gotFrame = false;
 
@@ -197,7 +192,11 @@ namespace Ryujinx.Graphics.Nvdec.FFmpeg
             {
                 _packet->Data = ptr;
                 _packet->Size = bitstream.Length;
-                result = _decodeFrame(_context, output.Frame, &got, _packet);
+                result = _decodeFrame(
+                    _context,
+                    output.Frame,
+                    &got,
+                    _packet);
             }
 
             FFmpegApi.av_packet_unref(_packet);

@@ -8,6 +8,11 @@ namespace Ryujinx.Graphics.Vulkan
 {
     internal class BarrierBatch : IDisposable
     {
+        // FEEDBACK-ENDPASS-E21 (diagnostic): on Turnip, end the render pass for attachment feedback-loop
+        // barriers (instead of NEOV2 Etapa 10 in-pass memory barrier). RYUJINX_TOTK_FEEDBACK_ENDPASS=1.
+        private static readonly bool FeedbackEndPassE21 =
+            System.Environment.GetEnvironmentVariable("RYUJINX_TOTK_FEEDBACK_ENDPASS") == "1";
+
         private const int MaxBarriersPerCall = 16;
 
         private const AccessFlags BaseAccess = AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit;
@@ -339,23 +344,28 @@ namespace Ryujinx.Graphics.Vulkan
                     {
                         if (!_gd.IsMoltenVk)
                         {
-                            if (!anyIsNonAttachment && _gd.IsTurnip)
+                            if (!anyIsNonAttachment && _gd.IsTurnip && !FeedbackEndPassE21)
                             {
                                 // NEOV2 Etapa 10: feedback loop on Turnip.
                                 // Keep the dependency as a memory barrier inside the pass (covered by the
                                 // subpass self-dependency), so the pass is not split and the data is visible.
 
-                                (AccessFlags superAccess, _) = GetSubpassAccessSuperset(_gd);
+                                (AccessFlags superAccess, PipelineStageFlags superStages) = GetSubpassAccessSuperset(_gd);
 
                                 foreach (BarrierWithStageFlags<ImageMemoryBarrier, TextureStorage> barrier in _imageBarriers)
                                 {
-                                    PipelineStageFlags src = ToGraphicsStages(
-                                        barrier.Flags.Source,
-                                        PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.LateFragmentTestsBit);
+                                    PipelineStageFlags src = barrier.Flags.Source & superStages;
+                                    PipelineStageFlags dst = barrier.Flags.Dest & superStages;
 
-                                    PipelineStageFlags dst = ToGraphicsStages(
-                                        barrier.Flags.Dest,
-                                        PipelineStageFlags.FragmentShaderBit);
+                                    if (src == PipelineStageFlags.None)
+                                    {
+                                        src = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.LateFragmentTestsBit;
+                                    }
+
+                                    if (dst == PipelineStageFlags.None)
+                                    {
+                                        dst = PipelineStageFlags.FragmentShaderBit;
+                                    }
 
                                     _memoryBarriers.Add(new BarrierWithStageFlags<MemoryBarrier, int>(
                                         new StageFlags(src, dst),
@@ -375,7 +385,7 @@ namespace Ryujinx.Graphics.Vulkan
                                     Logger.Info?.Print(LogClass.Gpu, "[NEOV2-ETAPA10] Feedback loop barrier kept inside render pass (Turnip)");
                                 }
                             }
-                            else if (!anyIsNonAttachment)
+                            else if (!anyIsNonAttachment && !(_gd.IsTurnip && FeedbackEndPassE21))
                             {
                                 // This case is a feedback loop. To prevent this from causing an absolute performance disaster,
                                 // remove the barriers entirely.
@@ -457,19 +467,6 @@ namespace Ryujinx.Graphics.Vulkan
                         _imageBarrierBatch.Pointer);
                 }
             }
-        }
-
-        private static PipelineStageFlags ToGraphicsStages(PipelineStageFlags stages, PipelineStageFlags fallback)
-        {
-            // NEOV2 Etapa 10: only stages covered by the subpass self-dependency (graphics) are valid in a render pass.
-            if ((stages & PipelineStageFlags.AllCommandsBit) != 0)
-            {
-                return PipelineStageFlags.AllGraphicsBit;
-            }
-
-            stages &= ~(PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.TransferBit | PipelineStageFlags.HostBit);
-
-            return stages == PipelineStageFlags.None ? fallback : stages;
         }
 
         private void QueueIncoherentBarrier(IncoherentBarrierType type)

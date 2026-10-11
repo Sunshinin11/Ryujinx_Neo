@@ -25,6 +25,7 @@ namespace Ryujinx.Graphics.Gpu
             /// Texture cache where the texture might be located.
             /// </summary>
             public TextureCache Cache { get; }
+            public PhysicalMemory PhysicalMemory { get; }
 
             /// <summary>
             /// Texture information.
@@ -67,6 +68,7 @@ namespace Ryujinx.Graphics.Gpu
             /// <param name="releaseCallback">Texture release callback</param>
             /// <param name="userObj">User defined object passed to the release callback, can be used to identify the texture</param>
             public PresentationTexture(
+                PhysicalMemory physicalMemory,
                 TextureCache cache,
                 TextureInfo info,
                 MultiRange range,
@@ -75,6 +77,7 @@ namespace Ryujinx.Graphics.Gpu
                 Action<object> releaseCallback,
                 object userObj)
             {
+                PhysicalMemory = physicalMemory;
                 Cache = cache;
                 Info = info;
                 Range = range;
@@ -88,7 +91,6 @@ namespace Ryujinx.Graphics.Gpu
         private readonly ConcurrentQueue<PresentationTexture> _frameQueue;
 
         private int _framesAvailable;
-
         public bool IsFrameAvailable => _framesAvailable != 0;
 
         /// <summary>
@@ -177,6 +179,7 @@ namespace Ryujinx.Graphics.Gpu
             MultiRange range = new(address, (ulong)size);
 
             _frameQueue.Enqueue(new PresentationTexture(
+                physicalMemory,
                 physicalMemory.TextureCache,
                 info,
                 range,
@@ -204,9 +207,6 @@ namespace Ryujinx.Graphics.Gpu
                 Image.Texture texture = pt.Cache.FindOrCreateTexture(null, TextureSearchFlags.WithUpscale, pt.Info, 0, range: pt.Range);
 
                 pt.Cache.Tick();
-
-                // NEOV2-GPUMEM1: Eden-style buffer collection and GPU memory statistics.
-                _context.TickGpuMemory();
 
                 texture.SynchronizeMemory();
 

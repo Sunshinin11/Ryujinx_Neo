@@ -11,7 +11,7 @@ namespace Ryujinx.Cpu.Nce
         [DllImport("libc", SetLastError = true)]
         private static extern int pthread_threadid_np(nint arg0, out ulong tid);
 
-        [DllImport("libpthread", SetLastError = true)]
+        [DllImport("libpthread.so.0", SetLastError = true)]
         private static extern int pthread_kill(nint thread, int sig);
 
         public static nint GetCurrentThreadHandle()

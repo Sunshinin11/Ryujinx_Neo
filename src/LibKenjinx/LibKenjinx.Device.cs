@@ -136,7 +136,6 @@ namespace LibKenjinx
                 switch (Path.GetExtension(path).ToLowerInvariant())
                 {
                     case ".xci":
-                    case ".xcz":
                         Logger.Info?.Print(LogClass.Application, "Loading as XCI.");
 
                         if (emulationContext != null && !emulationContext.LoadXci(path))
@@ -155,7 +154,6 @@ namespace LibKenjinx
                         }
                         break;
                     case ".nsp":
-                    case ".nsz":
                     case ".pfs0":
                         Logger.Info?.Print(LogClass.Application, "Loading as NSP.");
 
@@ -200,25 +198,7 @@ namespace LibKenjinx
             _isActive = false;
         }
 
-        // NEOV2-CLOSE1: impede duas execucoes simultaneas do fechamento.
-        private static int _closeInProgress;
-
         public static void CloseEmulation()
-        {
-            if (Interlocked.CompareExchange(ref _closeInProgress, 1, 0) != 0)
-                return;
-
-            try
-            {
-                CloseEmulationCore();
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _closeInProgress, 0);
-            }
-        }
-
-        private static void CloseEmulationCore()
         {
             if (SwitchDevice == null)
                 return;

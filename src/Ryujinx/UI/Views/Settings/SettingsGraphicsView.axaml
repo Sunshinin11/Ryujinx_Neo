@@ -253,6 +253,40 @@
                     </StackPanel>
                 </StackPanel>
                 <Separator Height="1" />
+                <TextBlock Classes="h1" Text="Sincronização gráfica Neo" />
+                <StackPanel
+                    Margin="10,0,0,0"
+                    HorizontalAlignment="Stretch"
+                    Orientation="Vertical"
+                    Spacing="10">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock VerticalAlignment="Center"
+                                   Width="250"
+                                   Text="Draw flush"
+                                   ToolTip.Tip="Controla a frequência de flush dos comandos gráficos. Reduzido costuma melhorar bastante o desempenho, mas pode causar defeitos em jogos que dependem de sincronização estrita." />
+                        <ComboBox Width="350"
+                                  SelectedIndex="{Binding DrawFlushModeIndex}"
+                                  ToolTip.Tip="Padrão prioriza compatibilidade; Reduzido evita flushes redundantes; Desativado tem maior risco de erros gráficos.">
+                            <ComboBoxItem Content="Padrão (seguro)" />
+                            <ComboBoxItem Content="Reduzido" />
+                            <ComboBoxItem Content="Desativado (experimental)" />
+                        </ComboBox>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock VerticalAlignment="Center"
+                                   Width="250"
+                                   Text="Buffer readback"
+                                   ToolTip.Tip="Controla quando dados produzidos pela GPU podem voltar à memória do jogo. O modo Híbrido preserva sincronização para geometria e evita copiar resultados parciais." />
+                        <ComboBox Width="350"
+                                  SelectedIndex="{Binding BufferReadbackModeIndex}"
+                                  ToolTip.Tip="Padrão é totalmente seguro; Relaxado maximiza desempenho com risco de cintilação; Híbrido busca manter o ganho sem corromper geometria.">
+                            <ComboBoxItem Content="Padrão (seguro)" />
+                            <ComboBoxItem Content="Relaxado (mais rápido)" />
+                            <ComboBoxItem Content="Híbrido (recomendado)" />
+                        </ComboBox>
+                    </StackPanel>
+                </StackPanel>
+                <Separator Height="1" />
                 <TextBlock Classes="h1" Text="{locale:Locale SettingsTabGraphicsDeveloperOptions}" />
                 <StackPanel
                     Margin="10,0,0,0"

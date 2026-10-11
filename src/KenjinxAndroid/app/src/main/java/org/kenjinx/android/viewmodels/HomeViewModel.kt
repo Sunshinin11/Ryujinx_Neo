@@ -82,7 +82,7 @@ class HomeViewModel(
 
         thread {
             try {
-                val validExtensions = setOf("xci", "xcz", "nsp", "nsz", "nro")
+                val validExtensions = setOf("xci", "nsp", "nro")
                 val queue = mutableListOf(folder)
 
                 while (queue.isNotEmpty()) {
@@ -170,7 +170,7 @@ class HomeViewModel(
         base.walkTopDown().forEach fileLoop@{ f ->
             if (!f.isFile) return@fileLoop
             val name = f.name.lowercase(Locale.getDefault())
-            if (!name.endsWith(".nsp") && !name.endsWith(".nsz")) return@fileLoop
+            if (!name.endsWith(".nsp")) return@fileLoop
 
             // Extract title ID from filename
             val tidPattern = Regex("\\[([0-9a-fA-F]{16})]")

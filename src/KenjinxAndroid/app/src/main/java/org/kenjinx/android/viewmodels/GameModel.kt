@@ -12,9 +12,8 @@ import org.kenjinx.android.KenjinxNative
 class GameModel(var file: DocumentFile, val context: Context) {
     private var updateDescriptor: ParcelFileDescriptor? = null
     var type: FileType = when {
-        // NEOV2-NCZ1: XCZ/NSZ usam o mesmo carregamento de XCI/NSP.
-        (file.extension == "xci" || file.extension == "xcz") -> FileType.Xci
-        (file.extension == "nsp" || file.extension == "nsz") -> FileType.Nsp
+        (file.extension == "xci") -> FileType.Xci
+        (file.extension == "nsp") -> FileType.Nsp
         (file.extension == "nro") -> FileType.Nro
         else -> FileType.None
     }

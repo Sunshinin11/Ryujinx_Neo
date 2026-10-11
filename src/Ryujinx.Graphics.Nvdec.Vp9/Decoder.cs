@@ -12,11 +12,6 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
 
         private readonly MemoryAllocator _allocator = new();
 
-        // NEOV2-VP9RYU132 (Ryubing #132): mapa de segmentacao preservado entre quadros inter.
-        private byte[] _lastSegmentMap = [];
-        private int _lastSegmentMapMiRows;
-        private int _lastSegmentMapMiCols;
-
         public ISurface CreateSurface(int width, int height)
         {
             return new Surface(width, height);
@@ -111,7 +106,6 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
             cm.AllocTileWorkerData(_allocator, tileCols, tileRows, maxThreads);
             cm.AllocContextBuffers(_allocator, output.Width, output.Height);
             cm.InitContextBuffers();
-            LoadSegmentMap(ref cm, ref pictureInfo); // NEOV2-VP9RYU132
             cm.SetupSegmentationDequant();
             cm.SetupScaleFactors();
 
@@ -158,61 +152,12 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
                 }
             }
 
-            SaveSegmentMap(ref cm); // NEOV2-VP9RYU132
             cm.GetMvs(mvsOut);
 
             cm.FreeTileWorkerData(_allocator);
             cm.FreeContextBuffers(_allocator);
 
             return true;
-        }
-
-        // NEOV2-VP9RYU132 (Ryubing #132)
-        private void LoadSegmentMap(ref Vp9Common cm, ref Vp9PictureInfo pictureInfo)
-        {
-            int mapLength = cm.MiRows * cm.MiCols;
-            if (mapLength == 0 || cm.LastFrameSegMap.IsNull)
-            {
-                return;
-            }
-
-            bool reset =
-                pictureInfo.IsKeyFrame ||
-                pictureInfo.IntraOnly ||
-                _lastSegmentMapMiRows != cm.MiRows ||
-                _lastSegmentMapMiCols != cm.MiCols;
-
-            if (_lastSegmentMap.Length != mapLength)
-            {
-                _lastSegmentMap = new byte[mapLength];
-            }
-            else if (reset)
-            {
-                Array.Clear(_lastSegmentMap);
-            }
-
-            _lastSegmentMapMiRows = cm.MiRows;
-            _lastSegmentMapMiCols = cm.MiCols;
-            _lastSegmentMap.CopyTo(cm.LastFrameSegMap.AsSpan());
-        }
-
-        // NEOV2-VP9RYU132 (Ryubing #132)
-        private void SaveSegmentMap(ref Vp9Common cm)
-        {
-            int mapLength = cm.MiRows * cm.MiCols;
-            if (!cm.Seg.Enabled || mapLength == 0 || cm.CurrentFrameSegMap.IsNull)
-            {
-                return;
-            }
-
-            if (_lastSegmentMap.Length != mapLength)
-            {
-                _lastSegmentMap = new byte[mapLength];
-            }
-
-            cm.CurrentFrameSegMap.AsSpan()[..mapLength].CopyTo(_lastSegmentMap);
-            _lastSegmentMapMiRows = cm.MiRows;
-            _lastSegmentMapMiCols = cm.MiCols;
         }
 
         public void Dispose()

@@ -1,4 +1,4 @@
-﻿using Ryujinx.Common.Diagnostics;
+using Ryujinx.Common.Diagnostics;
 using Ryujinx.Common.Logging;
 using Silk.NET.Vulkan;
 using System;
@@ -55,7 +55,11 @@ namespace Ryujinx.Graphics.Vulkan
             // forcam mais um envio imediato. O sync fica ligado ao command buffer atual e e enviado no
             // proximo flush natural. Se alguem esperar por ele antes disso, Wait() interrompe a thread
             // da GPU e faz o flush na hora (mesmo caminho ja usado pelos syncs nao strict).
-            if (eagerFlush && strict && _gd.IsTurnip && _gd.InterruptAction != null && NeoGraphicsSettings.StrictSyncMode != StrictSyncMode.Immediate)
+            if (eagerFlush &&
+                strict &&
+                _gd.IsTurnip &&
+                _gd.InterruptAction != null &&
+                NeoGraphicsSettings.StrictSyncMode != StrictSyncMode.Immediate)
             {
                 eagerFlush = false;
 

@@ -1,4 +1,4 @@
-﻿using Ryujinx.Common.Diagnostics;
+using Ryujinx.Common.Diagnostics;
 using Ryujinx.Memory.Range;
 using System;
 using System.Buffers;
@@ -24,7 +24,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// End address of the range in guest memory.
         /// </summary>
         public ulong EndAddress => Address + Size;
-
+        
         public BufferModifiedRange Next { get; set; }
         public BufferModifiedRange Previous { get; set; }
 
@@ -32,6 +32,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// The GPU sync number at the time of the last modification.
         /// </summary>
         public ulong SyncNumber { get; internal set; }
+
+        /// <summary>
+        /// Whether this GPU-written range has subsequently been consumed as geometry or indirect data.
+        /// Such ranges must never be exposed to the guest before their producing sync completes.
+        /// </summary>
+        public bool RequiresReadbackSync { get; internal set; }
 
         /// <summary>
         /// The range list that originally owned this range.
@@ -45,12 +51,18 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="size">Size of the range in bytes</param>
         /// <param name="syncNumber">The GPU sync number at the time of creation</param>
         /// <param name="parent">The range list that owns this range</param>
-        public BufferModifiedRange(ulong address, ulong size, ulong syncNumber, BufferModifiedRangeList parent)
+        public BufferModifiedRange(
+            ulong address,
+            ulong size,
+            ulong syncNumber,
+            BufferModifiedRangeList parent,
+            bool requiresReadbackSync = false)
         {
             Address = address;
             Size = size;
             SyncNumber = syncNumber;
             Parent = parent;
+            RequiresReadbackSync = requiresReadbackSync;
         }
 
         /// <summary>
@@ -175,6 +187,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 {
                     first.SyncNumber = syncNumber;
                     first.Parent = this;
+                    first.RequiresReadbackSync = false;
                     Lock.ExitWriteLock();
                     return;
                 }
@@ -184,9 +197,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
                     if (first.EndAddress > endAddress)
                     {
                         Add(new BufferModifiedRange(endAddress, first.EndAddress - endAddress,
-                            first.SyncNumber, first.Parent));
+                            first.SyncNumber, first.Parent, first.RequiresReadbackSync));
                     }
-
+                    
                     first.Size = address - first.Address;
                 }
                 else
@@ -202,9 +215,10 @@ namespace Ryujinx.Graphics.Gpu.Memory
                         first.Size = size;
                         first.SyncNumber = syncNumber;
                         first.Parent = this;
-
+                        first.RequiresReadbackSync = false;
+                        
                         Lock.ExitWriteLock();
-
+                        
                         return;
                     }
                 }
@@ -235,6 +249,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 first.Size = size;
                 first.SyncNumber = syncNumber;
                 first.Parent = this;
+                first.RequiresReadbackSync = false;
             }
             else if (first.Address == last.Address)
             {
@@ -242,10 +257,37 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 first.Size = size;
                 first.SyncNumber = syncNumber;
                 first.Parent = this;
+                first.RequiresReadbackSync = false;
             }
             else
             {
                 Add(new BufferModifiedRange(address, size, syncNumber, this));
+            }
+            
+            Lock.ExitWriteLock();
+        }
+
+        /// <summary>
+        /// Marks GPU-written ranges that are later consumed as vertex, index or indirect data.
+        /// This lets hybrid readback preserve correctness only where stale data can alter geometry.
+        /// </summary>
+        public void SignalUsage(ulong address, ulong size, BufferStage stage)
+        {
+            BufferStage rawStage = stage & BufferStage.StageMask;
+
+            if (rawStage != BufferStage.VertexBuffer &&
+                rawStage != BufferStage.IndexBuffer &&
+                rawStage != BufferStage.Indirect)
+            {
+                return;
+            }
+
+            Lock.EnterWriteLock();
+            ReadOnlySpan<BufferModifiedRange> overlaps = FindOverlapsAsSpan(address, size);
+
+            for (int i = 0; i < overlaps.Length; i++)
+            {
+                overlaps[i].RequiresReadbackSync = true;
             }
 
             Lock.ExitWriteLock();
@@ -296,7 +338,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                     BufferModifiedRange overlap = overlaps[i];
                     rangeAction(overlap.Address, overlap.Size);
                 }
-
+                
                 ArrayPool<BufferModifiedRange>.Shared.Return(overlaps);
             }
         }
@@ -350,8 +392,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
             long highestDiff,
             ulong currentSync,
             ulong address,
-            ulong endAddress,
-            bool preserveOnFailure = false)
+            ulong endAddress)
         {
             if (_migrationTarget == null)
             {
@@ -368,11 +409,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
                         ulong clampAddress = Math.Max(address, overlap.Address);
                         ulong clampEnd = Math.Min(endAddress, overlap.EndAddress);
 
-                        if (preserveOnFailure)
-                        {
-                            RangeActionWithMigration(clampAddress, clampEnd - clampAddress, waitSync, _flushAction);
-                        }
-
                         if (i == 0 || i == rangeCount - 1)
                         {
                             ClearPart(overlap, clampAddress, clampEnd);
@@ -382,10 +418,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                             Remove(overlap);
                         }
 
-                        if (!preserveOnFailure)
-                        {
-                            RangeActionWithMigration(clampAddress, clampEnd - clampAddress, waitSync, _flushAction);
-                        }
+                        RangeActionWithMigration(clampAddress, clampEnd - clampAddress, waitSync, _flushAction);
                     }
                 }
 
@@ -394,7 +427,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
             // There is a migration target to call instead. This can't be changed after set so accessing it outside the lock is fine.
 
-            _migrationTarget.RemoveRangesAndFlush(overlaps, rangeCount, highestDiff, currentSync, address, endAddress, preserveOnFailure);
+            _migrationTarget.RemoveRangesAndFlush(overlaps, rangeCount, highestDiff, currentSync, address, endAddress);
         }
 
         /// <summary>
@@ -408,7 +441,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// </remarks>
         /// <param name="address">Start address to query</param>
         /// <param name="size">Size to query</param>
-        public void WaitForAndFlushRanges(ulong address, ulong size, bool forceSync = false)
+        public void WaitForAndFlushRanges(ulong address, ulong size)
         {
             ulong endAddress = address + size;
             ulong currentSync = _context.SyncNumber;
@@ -416,62 +449,91 @@ namespace Ryujinx.Graphics.Gpu.Memory
             // Range list must be consistent for this operation
             if (_migrationTarget != null)
             {
-                _migrationTarget.WaitForAndFlushRanges(address, size, forceSync);
+                _migrationTarget.WaitForAndFlushRanges(address, size);
 
                 return;
             }
-
+            
             Lock.EnterWriteLock();
-            BufferModifiedRange[] overlaps = null;
-            try
+            // We use the non-span method here because the array is partially modified by the code, which would invalidate a span.
+            BufferModifiedRange[] overlaps = FindOverlapsAsArray(address, size, out int rangeCount);
+
+            if (rangeCount == 0)
             {
-                // We use the non-span method here because the array is partially modified by the code, which would invalidate a span.
-                overlaps = FindOverlapsAsArray(address, size, out int rangeCount);
+                Lock.ExitWriteLock();
+                
+                return;
+            }
 
-                if (rangeCount == 0)
+            // First, determine which syncpoint to wait on.
+            // This is the latest syncpoint that is not equal to the current sync.
+
+            long highestDiff = long.MinValue;
+
+            for (int i = 0; i < rangeCount; i++)
+            {
+                BufferModifiedRange overlap = overlaps![i];
+
+                long diff = (long)(overlap.SyncNumber - currentSync);
+
+                if (diff < 0 && diff > highestDiff)
                 {
-
-                    return;
+                    highestDiff = diff;
                 }
+            }
 
-                // First, determine which syncpoint to wait on.
-                // This is the latest syncpoint that is not equal to the current sync.
+            if (highestDiff == long.MinValue)
+            {
+                Lock.ExitWriteLock();
+                
+                return;
+            }
 
-                long highestDiff = long.MinValue;
+            ulong waitSync = currentSync + (ulong)highestDiff;
+            BufferReadbackMode readbackMode = NeoGraphicsSettings.BufferReadbackMode;
+
+            if (readbackMode == BufferReadbackMode.Hybrid)
+            {
+                bool critical = false;
 
                 for (int i = 0; i < rangeCount; i++)
                 {
                     BufferModifiedRange overlap = overlaps![i];
-
                     long diff = (long)(overlap.SyncNumber - currentSync);
 
-                    if (diff < 0 && diff > highestDiff)
+                    if (diff <= highestDiff && overlap.RequiresReadbackSync)
                     {
-                        highestDiff = diff;
+                        critical = true;
+                        break;
                     }
                 }
 
-                if (highestDiff == long.MinValue)
+                // Completed work is always safe to copy. Pending non-geometry data is left
+                // untouched so the guest sees its last coherent value, not a partial GPU write.
+                if (_context.Renderer.GetCurrentSync() < waitSync)
                 {
-
-                    return;
+                    if (critical)
+                    {
+                        _context.Renderer.WaitSync(waitSync);
+                    }
+                    else
+                    {
+                        ArrayPool<BufferModifiedRange>.Shared.Return(overlaps!);
+                        Lock.ExitWriteLock();
+                        return;
+                    }
                 }
-
-                // Wait for the syncpoint.
-                bool relaxedReadback = NeoGraphicsSettings.BufferReadbackMode == BufferReadbackMode.Relaxed;
-
-                if (forceSync || !relaxedReadback)
-                {
-                    _context.Renderer.WaitSync(currentSync + (ulong)highestDiff);
-                }
-
-                RemoveRangesAndFlush(overlaps, rangeCount, highestDiff, currentSync, address, endAddress, forceSync);
             }
-            finally
+            else if (readbackMode != BufferReadbackMode.Relaxed)
             {
-                if (overlaps != null) ArrayPool<BufferModifiedRange>.Shared.Return(overlaps);
-                Lock.ExitWriteLock();
+                _context.Renderer.WaitSync(waitSync);
             }
+
+            RemoveRangesAndFlush(overlaps, rangeCount, highestDiff, currentSync, address, endAddress);
+            
+            ArrayPool<BufferModifiedRange>.Shared.Return(overlaps!);
+            
+            Lock.ExitWriteLock();
         }
 
         /// <summary>
@@ -531,7 +593,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                     registerRangeAction(range.Address, range.Size);
                 }
             }
-
+            
             ArrayPool<BufferModifiedRange>.Shared.Return(inheritRanges);
         }
 
@@ -581,7 +643,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 {
                     Add(new BufferModifiedRange(endAddress, overlap.EndAddress - endAddress, overlap.SyncNumber, overlap.Parent));
                 }
-
+                
                 overlap.Size = address - overlap.Address;
             }
             else if (overlap.EndAddress > endAddress)
@@ -605,7 +667,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
             ulong endAddress = address + size;
             Lock.EnterWriteLock();
             (BufferModifiedRange first, BufferModifiedRange last) = FindOverlapsAsNodes(address, size);
-
+            
             if (first is null)
             {
                 Lock.ExitWriteLock();

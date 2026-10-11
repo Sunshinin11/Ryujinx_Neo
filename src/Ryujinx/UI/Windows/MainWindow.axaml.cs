@@ -49,6 +49,7 @@ namespace Ryujinx.Ava.UI.Windows
         private static bool _startFullscreen;
         internal readonly AvaHostUIHandler UiHandler;
         private IDisposable _appLibraryAppsSubscription;
+        private GamepadUiNavigation _gamepadUiNavigation;
 
         public VirtualFileSystem VirtualFileSystem { get; private set; }
         public ContentManager ContentManager { get; private set; }
@@ -108,6 +109,7 @@ namespace Ryujinx.Ava.UI.Windows
             if (Program.PreviewerDetached)
             {
                 InputManager = new InputManager(new AvaloniaKeyboardDriver(this), new SDL3GamepadDriver());
+                _gamepadUiNavigation = new GamepadUiNavigation(this, InputManager);
 
                 this.GetObservable(IsActiveProperty).Subscribe(IsActiveChanged);
                 this.ScalingChanged += OnScalingChanged;
@@ -639,6 +641,7 @@ namespace Ryujinx.Ava.UI.Windows
             }
 
             ApplicationLibrary.CancelLoading();
+            _gamepadUiNavigation?.Dispose();
             InputManager.Dispose();
             _appLibraryAppsSubscription?.Dispose();
             Program.Exit();

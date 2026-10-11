@@ -22,6 +22,7 @@ using Ryujinx.Ava.UI.Windows;
 using Ryujinx.Common;
 using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Configuration.Multiplayer;
+using Ryujinx.Common.Diagnostics;
 using Ryujinx.Common.Logging;
 using Ryujinx.Common.SystemInterop;
 using Ryujinx.Common.Utilities;
@@ -70,6 +71,7 @@ namespace Ryujinx.Ava
         private const int CursorHideIdleTime = 5; // Hide Cursor seconds.
         private const float MaxResolutionScale = 4.0f; // Max resolution hotkeys can scale to before wrapping.
         private const int TargetFps = 60;
+        private readonly GameSettingsProfile _gameSettingsProfile;
         private const float VolumeDelta = 0.05f;
 
         private static readonly Cursor _invisibleCursor = new(StandardCursorType.None);
@@ -171,6 +173,24 @@ namespace Ryujinx.Ava
             TouchScreenManager = _inputManager.CreateTouchScreenManager();
             ApplicationPath = applicationPath;
             ApplicationId = applicationId;
+            _gameSettingsProfile = GameSettingsProfileStore.Load(applicationId);
+
+
+            // NCE-PROT1 must be selected before HLE/Switch/NCE creation.
+            // Explicitly reset to false for games where it is not enabled.
+            Ryujinx.Cpu.Nce.MemoryManagerNative.TrackingProtectionRestoreEnabled =
+                _gameSettingsProfile.Enabled &&
+                _gameSettingsProfile.NceProtectionRestore == true;
+
+            Logger.Info?.PrintMsg(
+                LogClass.Cpu,
+                $"[NEOV2-NCE-PROT1] profile={applicationId:X16} enabled={Ryujinx.Cpu.Nce.MemoryManagerNative.TrackingProtectionRestoreEnabled}");
+            if (_gameSettingsProfile.Enabled)
+            {
+                Logger.Info?.PrintMsg(
+                    LogClass.Application,
+                    $"[NEOV2-PROFILE] Enabled profile for {applicationId:X16}");
+            }
             VirtualFileSystem = virtualFileSystem;
             ContentManager = contentManager;
 
@@ -528,7 +548,13 @@ namespace Ryujinx.Ava
 
         private void UpdateDockedModeState(object sender, ReactiveEventArgs<bool> e)
         {
-            Device?.System.ChangeDockedModeState(e.NewValue);
+            bool effectiveDockedMode =
+                _gameSettingsProfile.Enabled &&
+                _gameSettingsProfile.EnableDockedMode.HasValue
+                    ? _gameSettingsProfile.EnableDockedMode.Value
+                    : e.NewValue;
+
+            Device?.System.ChangeDockedModeState(effectiveDockedMode);
         }
 
         private void UpdateAudioVolumeState(object sender, ReactiveEventArgs<float> e)
@@ -687,8 +713,12 @@ namespace Ryujinx.Ava
 
         public async Task LoadGuestApplication(CancellationTokenSource cts, BlitStruct<ApplicationControlProperty>? customNacpData = null)
         {
-            InitializeSwitchInstance();
+            // Establish desktop global graphics defaults first.
             MainWindow.UpdateGraphicsConfig();
+
+            // InitializeSwitchInstance applies the per-game overrides before
+            // creating the renderer and GPU/HLE consumers.
+            InitializeSwitchInstance();
 
             SystemVersion firmwareVersion = ContentManager.GetCurrentFirmwareVersion();
 
@@ -916,10 +946,169 @@ namespace Ryujinx.Ava
             Logger.Info?.Print(LogClass.Emulation, "Emulation was paused.");
         }
 
+
+        private void ApplyGameGraphicsProfile()
+        {
+            ConfigurationState.GraphicsSection global = ConfigurationState.Instance.Graphics;
+            bool profileEnabled = _gameSettingsProfile.Enabled;
+
+            int resScaleSetting =
+                profileEnabled && _gameSettingsProfile.ResScale.HasValue
+                    ? _gameSettingsProfile.ResScale.Value
+                    : global.ResScale.Value;
+
+            float resScaleCustom =
+                profileEnabled && _gameSettingsProfile.ResScaleCustom.HasValue
+                    ? _gameSettingsProfile.ResScaleCustom.Value
+                    : global.ResScaleCustom.Value;
+
+            GraphicsConfig.ResScale =
+                resScaleSetting == -1
+                    ? resScaleCustom
+                    : resScaleSetting;
+
+            GraphicsConfig.MaxAnisotropy =
+                profileEnabled && _gameSettingsProfile.MaxAnisotropy.HasValue
+                    ? _gameSettingsProfile.MaxAnisotropy.Value
+                    : global.MaxAnisotropy.Value;
+
+            GraphicsConfig.ShadersDumpPath = global.ShadersDumpPath.Value;
+
+            GraphicsConfig.EnableShaderCache =
+                profileEnabled && _gameSettingsProfile.EnableShaderCache.HasValue
+                    ? _gameSettingsProfile.EnableShaderCache.Value
+                    : global.EnableShaderCache.Value;
+
+            // A UI Linux ainda não possui um toggle global para esta opção.
+            // Portanto, sem override por jogo, usamos o default seguro do NEOV2.
+            GraphicsConfig.EnableShaderLoopSafety =
+                profileEnabled && _gameSettingsProfile.EnableShaderLoopSafety.HasValue
+                    ? _gameSettingsProfile.EnableShaderLoopSafety.Value
+                    : false;
+
+            GraphicsConfig.EnableTextureRecompression =
+                profileEnabled && _gameSettingsProfile.EnableTextureRecompression.HasValue
+                    ? _gameSettingsProfile.EnableTextureRecompression.Value
+                    : global.EnableTextureRecompression.Value;
+
+            GraphicsConfig.EnableMacroHLE =
+                profileEnabled && _gameSettingsProfile.EnableMacroHLE.HasValue
+                    ? _gameSettingsProfile.EnableMacroHLE.Value
+                    : global.EnableMacroHLE.Value;
+
+            // NEOV2-PERGAME-EXTRA
+            // Flags do GraphicsConfig sem configuração global equivalente.
+            GraphicsConfig.RelaxedDmaCopy =
+                profileEnabled && _gameSettingsProfile.RelaxedDmaCopy.HasValue
+                    ? _gameSettingsProfile.RelaxedDmaCopy.Value
+                    : false;
+
+            GraphicsConfig.EnableVtgViaCompute =
+                profileEnabled && _gameSettingsProfile.EnableVtgViaCompute.HasValue
+                    ? _gameSettingsProfile.EnableVtgViaCompute.Value
+                    : true;
+
+            GraphicsConfig.RejectUnmappedTextureDescriptors =
+                profileEnabled && _gameSettingsProfile.RejectUnmappedTextureDescriptors.HasValue
+                    ? _gameSettingsProfile.RejectUnmappedTextureDescriptors.Value
+                    : false;
+
+            GraphicsConfig.AsyncLarge3DTextureUpload =
+                profileEnabled && _gameSettingsProfile.AsyncLarge3DTextureUpload.HasValue
+                    ? _gameSettingsProfile.AsyncLarge3DTextureUpload.Value
+                    : true;
+
+            // Pacote GPU do 2a1c968.
+            // TEXBUF-ALIGN não faz parte do toggle: permanece sempre ativo.
+            bool gpuOptimizations =
+                profileEnabled && _gameSettingsProfile.GpuOptimizations.HasValue
+                    ? _gameSettingsProfile.GpuOptimizations.Value
+                    : true;
+
+            NeoGraphicsSettings.TurnipFenceEnabled = gpuOptimizations;
+            // NEOV2 GLOBAL-TIMELINE-BATCH1: use the lower-overhead timeline submit path by
+            // default for every title. A per-game false remains available as a compatibility
+            // escape hatch for titles or drivers that regress.
+            NeoGraphicsSettings.TurnipTimelineBatchingEnabled =
+                !profileEnabled || _gameSettingsProfile.TurnipTimelineBatching != false;
+            NeoGraphicsSettings.ConditionalRenderNoWaitEnabled = gpuOptimizations;
+            NeoGraphicsSettings.CommandFetchWithoutFlushEnabled = gpuOptimizations;
+            NeoGraphicsSettings.QueueHysteresisEnabled = gpuOptimizations;
+            NeoGraphicsSettings.TimelineLazyEnabled = gpuOptimizations;
+            NeoGraphicsSettings.StagingBufferLockEnabled = gpuOptimizations;
+            NeoGraphicsSettings.TexturePoolKeepInvalidEnabled = gpuOptimizations;
+
+            // Este fix é intencionalmente permanente.
+            NeoGraphicsSettings.TexelBufferExactOffsetEnabled = true;
+
+            NeoGraphicsSettings.ExperimentalGameFixesEnabled =
+                profileEnabled && _gameSettingsProfile.ExperimentalGameFixesEnabled.HasValue
+                    ? _gameSettingsProfile.ExperimentalGameFixesEnabled.Value
+                    : false;
+
+            NeoGraphicsSettings.NifmOfflineEnabled =
+                profileEnabled && _gameSettingsProfile.NifmOfflineEnabled.HasValue
+                    ? _gameSettingsProfile.NifmOfflineEnabled.Value
+                    : false;
+
+            // Overrides do backend. Null = usar a configuração global.
+            NeoGraphicsSettings.DrawFlushGameOverride =
+                profileEnabled
+                    ? _gameSettingsProfile.DrawFlushMode
+                    : null;
+
+            NeoGraphicsSettings.BufferReadbackGameOverride =
+                profileEnabled
+                    ? _gameSettingsProfile.BufferReadbackMode
+                    : null;
+
+            NeoGraphicsSettings.StrictSyncGameOverride =
+                profileEnabled
+                    ? _gameSettingsProfile.StrictSyncMode
+                    : null;
+
+            NeoGraphicsSettings.DrawFlushMode =
+                NeoGraphicsSettings.DrawFlushGameOverride ??
+                NeoGraphicsSettings.DrawFlushGlobalMode;
+
+            NeoGraphicsSettings.BufferReadbackMode =
+                NeoGraphicsSettings.BufferReadbackGameOverride ??
+                NeoGraphicsSettings.BufferReadbackGlobalMode;
+
+            NeoGraphicsSettings.StrictSyncMode =
+                NeoGraphicsSettings.StrictSyncGameOverride ??
+                NeoGraphicsSettings.StrictSyncGlobalMode;
+
+            Logger.Info?.PrintMsg(
+                LogClass.Gpu,
+                $"[NEOV2-PROFILE-GPU] TitleId={ApplicationId:X16} " +
+                $"enabled={profileEnabled} " +
+                $"ResScale={GraphicsConfig.ResScale} " +
+                $"Aniso={GraphicsConfig.MaxAnisotropy} " +
+                $"ShaderCache={GraphicsConfig.EnableShaderCache} " +
+                $"LoopSafety={GraphicsConfig.EnableShaderLoopSafety} " +
+                $"TextureRecompression={GraphicsConfig.EnableTextureRecompression} " +
+                $"MacroHLE={GraphicsConfig.EnableMacroHLE} " +
+                $"RelaxedDMA={GraphicsConfig.RelaxedDmaCopy} " +
+                $"VTG={GraphicsConfig.EnableVtgViaCompute} " +
+                $"RejectUnmapped={GraphicsConfig.RejectUnmappedTextureDescriptors} " +
+                $"Async3D={GraphicsConfig.AsyncLarge3DTextureUpload} " +
+                $"GpuOpt={gpuOptimizations} " +
+                $"Experimental2D={NeoGraphicsSettings.ExperimentalGameFixesEnabled} " +
+                $"NifmOffline={NeoGraphicsSettings.NifmOfflineEnabled} " +
+                $"DrawFlush={NeoGraphicsSettings.DrawFlushMode} " +
+                $"Readback={NeoGraphicsSettings.BufferReadbackMode} " +
+                $"StrictSync={NeoGraphicsSettings.StrictSyncMode}");
+        }
+
         private void InitializeSwitchInstance()
         {
             // Initialize KeySet.
             VirtualFileSystem.ReloadKeySet();
+
+            // NEOV2: global GraphicsConfig was established by LoadGuestApplication.
+            // Apply the per-game overrides now, before creating the renderer.
+            ApplyGameGraphicsProfile();
 
             // Initialize Renderer.
             IRenderer renderer;
@@ -950,7 +1139,50 @@ namespace Ryujinx.Ava
             // Initialize Configuration.
             MemoryConfiguration memoryConfiguration = ConfigurationState.Instance.System.DramSize.Value;
 
-            HLEConfiguration configuration = new(VirtualFileSystem,
+            bool profileEnabled = _gameSettingsProfile.Enabled;
+
+            bool useNce =
+                profileEnabled && _gameSettingsProfile.UseNce.HasValue
+                    ? _gameSettingsProfile.UseNce.Value
+                    : ConfigurationState.Instance.System.UseHypervisor.Value;
+
+            bool enablePtc =
+                profileEnabled && _gameSettingsProfile.EnablePtc.HasValue
+                    ? _gameSettingsProfile.EnablePtc.Value
+                    : ConfigurationState.Instance.System.EnablePtc.Value;
+
+            VSyncMode vSyncMode =
+                profileEnabled && _gameSettingsProfile.VSyncMode.HasValue
+                    ? _gameSettingsProfile.VSyncMode.Value
+                    : ConfigurationState.Instance.Graphics.VSyncMode.Value;
+
+            bool dockedMode =
+                profileEnabled && _gameSettingsProfile.EnableDockedMode.HasValue
+                    ? _gameSettingsProfile.EnableDockedMode.Value
+                    : ConfigurationState.Instance.System.EnableDockedMode.Value;
+
+            const ulong TotkTitleId = 0x0100F2C0115B6000UL;
+
+            bool memorySlackEnabled =
+                profileEnabled && _gameSettingsProfile.MemorySlackEnabled.HasValue
+                    ? _gameSettingsProfile.MemorySlackEnabled.Value
+                    : ApplicationId == TotkTitleId;
+
+            // NEOV2 TOTK-MEMSLACK2: 12 GiB of extra guest memory creates a 16 GiB
+            // shared backing file and drives 12 GiB hosts into zram. TotK keeps a
+            // generous 4 GiB extension (about 7.3 GiB application memory total)
+            // without allowing the guest/driver working set to grow unbounded.
+            ulong memorySlackMiB = ApplicationId == TotkTitleId ? 4096UL : 12288UL;
+
+            ulong memorySlack = memorySlackEnabled
+                ? memorySlackMiB * 1024 * 1024
+                : 0UL;
+
+            Logger.Info?.PrintMsg(
+                LogClass.Emulation,
+                $"[NEOV2-PROFILE] TitleId={ApplicationId:X16} enabled={profileEnabled} NCE={useNce} PPTC={enablePtc} Docked={dockedMode} VSync={vSyncMode} MemorySlack={memorySlack / 1024 / 1024}MB");
+
+                        HLEConfiguration configuration = new(VirtualFileSystem,
                                                      _viewModel.LibHacHorizonManager,
                                                      ContentManager,
                                                      _accountManager,
@@ -958,13 +1190,13 @@ namespace Ryujinx.Ava
                                                      renderer,
                                                      InitializeAudio(),
                                                      memoryConfiguration,
-                                                     12288 * 1024 * 1024UL,
+                                                     memorySlack,
                                                      _viewModel.UiHandler,
                                                      (SystemLanguage)ConfigurationState.Instance.System.Language.Value,
                                                      (RegionCode)ConfigurationState.Instance.System.Region.Value,
-                                                     ConfigurationState.Instance.Graphics.VSyncMode,
-                                                     ConfigurationState.Instance.System.EnableDockedMode,
-                                                     ConfigurationState.Instance.System.EnablePtc,
+                                                     vSyncMode,
+                                                     dockedMode,
+                                                     enablePtc,
                                                      ConfigurationState.Instance.System.EnableInternetAccess,
                                                      ConfigurationState.Instance.System.EnableFsIntegrityChecks ? IntegrityCheckLevel.ErrorOnInvalid : IntegrityCheckLevel.None,
                                                      ConfigurationState.Instance.System.FsGlobalAccessLogMode,
@@ -972,11 +1204,11 @@ namespace Ryujinx.Ava
                                                          ? 0 
                                                          : ConfigurationState.Instance.System.SystemTimeOffset,
                                                      ConfigurationState.Instance.System.TimeZone,
-                                                     ConfigurationState.Instance.System.MemoryManagerMode,
+                                                     ConfigurationState.Instance.System.MemoryManagerMode.Value,
                                                      ConfigurationState.Instance.System.IgnoreMissingServices,
                                                      ConfigurationState.Instance.Graphics.AspectRatio,
                                                      ConfigurationState.Instance.System.AudioVolume,
-                                                     ConfigurationState.Instance.System.UseHypervisor,
+                                                     useNce,
                                                      ConfigurationState.Instance.Multiplayer.LanInterfaceId.Value,
                                                      ConfigurationState.Instance.Multiplayer.Mode,
                                                      ConfigurationState.Instance.Multiplayer.DisableP2p,
@@ -1170,10 +1402,14 @@ namespace Ryujinx.Ava
             _viewModel.GpuNameText = $"GPU: {_renderer.GetHardwareInfo().GpuDriver}";
         }
 
+        private static readonly bool _fpsLogEnabled = System.Environment.GetEnvironmentVariable("RYUJINX_NEO_FPS_LOG") == "1";
+        private long _fpsLogLast;
+
         public void UpdateStatus()
         {
             // Run a status update only when a frame is to be drawn. This prevents from updating the ui and wasting a render when no frame is queued.
-            string dockedMode = ConfigurationState.Instance.System.EnableDockedMode ? LocaleManager.Instance[LocaleKeys.Docked] : LocaleManager.Instance[LocaleKeys.Handheld];
+            bool effectiveDockedMode = Device?.System.State.DockedMode ?? ConfigurationState.Instance.System.EnableDockedMode.Value;
+            string dockedMode = effectiveDockedMode ? LocaleManager.Instance[LocaleKeys.Docked] : LocaleManager.Instance[LocaleKeys.Handheld];
             string vSyncMode = Device.VSyncMode.ToString();
 
             UpdateShaderCount();
@@ -1181,6 +1417,14 @@ namespace Ryujinx.Ava
             if (GraphicsConfig.ResScale != 1)
             {
                 dockedMode += $" ({GraphicsConfig.ResScale}x)";
+            }
+
+            // NEO-FPSLOG (diag): RYUJINX_NEO_FPS_LOG=1 logs game FPS / frame time / FIFO once per second.
+            if (_fpsLogEnabled && System.Diagnostics.Stopwatch.GetElapsedTime(_fpsLogLast).TotalSeconds >= 1)
+            {
+                _fpsLogLast = System.Diagnostics.Stopwatch.GetTimestamp();
+                Logger.Info?.Print(LogClass.Application,
+                    $"[NEO-FPS] fps={Device.Statistics.GetGameFrameRate():F2} ms={Device.Statistics.GetGameFrameTime():F2} fifo={Device.Statistics.GetFifoPercent():F1} maxms={Device.Statistics.GetGameMaxFrameTime():F1} {Ryujinx.Common.Diagnostics.NeoHitchStats.SnapshotAndReset()}");
             }
 
             StatusUpdatedEvent?.Invoke(this, new StatusUpdatedEventArgs(

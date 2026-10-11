@@ -356,98 +356,6 @@ namespace Ryujinx.Graphics.Gpu.Image
             return ref descriptor;
         }
 
-        // NEOV2-ARRAYMEM1: cached "placeholder backing" decisions, valid while the descriptor and GPU mapping are unchanged.
-        private readonly Dictionary<int, (TextureDescriptor Descriptor, int Generation)> _arraySparseCache = new();
-        private readonly HashSet<ulong> _arraySparseScratch = new();
-
-        /// <summary>
-        /// NEOV2-ARRAYMEM1: same as <see cref="GetForBinding(int, FormatInfo, out Texture)"/>, for bindless texture arrays.
-        /// With "Memoria de GPU estilo Eden" on, a texture that does not exist yet is only created when it is backed by real
-        /// memory and the memory budget allows it. Otherwise the entry stays empty and is counted as skipped in <paramref name="budget"/>.
-        /// </summary>
-        public ref readonly TextureDescriptor GetForArrayBinding(int id, FormatInfo formatInfo, out Texture texture, TextureArrayBudget budget, bool? usedByShader = null)
-        {
-            if (budget == null || !TextureArrayBudget.Enabled || (uint)id >= Items.Length)
-            {
-                return ref GetForBinding(id, formatInfo, out texture);
-            }
-
-            if (Items[id] != null)
-            {
-
-                return ref GetForBinding(id, formatInfo, out texture);
-            }
-
-            ref readonly TextureDescriptor descriptor = ref GetDescriptorRef(id);
-
-            ulong address = descriptor.UnpackAddress();
-
-            if (address == 0 || _invalidMap.IsSet(id))
-            {
-                // Nothing will be created for this entry.
-                return ref GetForBinding(id, formatInfo, out texture);
-            }
-
-            if (usedByShader == false)
-            {
-                // NEOV2-ARRAYFB1: the shader feedback says this entry was never sampled, so it does not need a host texture.
-                texture = null;
-
-                return ref descriptor;
-            }
-
-            int generation = _channel.MemoryManager.MappingGeneration;
-
-            if (_arraySparseCache.TryGetValue(id, out var cached) && cached.Generation == generation && cached.Descriptor.Equals(descriptor))
-            {
-                budget.SkippedSparse++;
-                texture = null;
-
-                return ref descriptor;
-            }
-
-            if (!budget.BudgetAvailable)
-            {
-                budget.SkippedBudget++;
-                texture = null;
-
-                return ref descriptor;
-            }
-
-            TextureInfo info = GetInfo(descriptor, out int layerSize);
-
-            if (info.Target != Target.TextureBuffer)
-            {
-                ulong size = (ulong)info.CalculateSizeInfo(layerSize).TotalSize;
-
-                if (size >= 64 * 1024 && _channel.MemoryManager.IsSparseOrAliasedBacking(address, size, _arraySparseScratch))
-                {
-                    if (_arraySparseCache.Count >= 65536)
-                    {
-                        _arraySparseCache.Clear();
-                    }
-
-                    _arraySparseCache[id] = (descriptor, generation);
-
-                    budget.SkippedSparse++;
-                    texture = null;
-
-                    return ref descriptor;
-                }
-            }
-
-            _arraySparseCache.Remove(id);
-
-            ref readonly TextureDescriptor result = ref GetForBinding(id, formatInfo, out texture);
-
-            if (texture != null)
-            {
-                budget.OnCreated();
-            }
-
-            return ref result;
-        }
-
         /// <summary>
         /// Checks if the pool was modified, and returns the last sequence number where a modification was detected.
         /// </summary>
@@ -626,6 +534,7 @@ namespace Ryujinx.Graphics.Gpu.Image
                         RemoveAliasList(texture);
                     }
                 }
+
                 else if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.TexturePoolKeepInvalidEnabled && _invalidMap.IsSet(id))
                 {
                     ref readonly TextureDescriptor newDescriptor = ref GetDescriptorRefAddress(address);

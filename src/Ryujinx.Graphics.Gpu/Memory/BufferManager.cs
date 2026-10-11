@@ -1,4 +1,5 @@
 using Ryujinx.Common;
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Gpu.Image;
 using Ryujinx.Graphics.Gpu.Shader;
@@ -31,15 +32,17 @@ namespace Ryujinx.Graphics.Gpu.Memory
         private readonly List<BufferTextureArrayBinding<IImageArray>> _bufferImageArrays;
         private readonly BufferAssignment[] _ranges;
 
-        // NEOV2-BUFFER-SYNC-DEDUP: Uniform buffers are frequently shared by more than one
-        // shader stage. Avoid synchronizing the exact same physical range more than once
-        // in a graphics commit. Hash collisions are misses, never false hits.
-        private readonly bool _hugareOptimizations = Ryujinx.Common.Diagnostics.NeoGraphicsSettings.HugareOptimizationsEnabled;
+        // NEOV2-BUFFER-SYNCDEDUP1: Uniform buffers are frequently shared by more than one
+        // shader stage. Avoid querying and synchronizing the exact same physical range more
+        // than once in a single graphics commit. Collisions are misses, never false hits.
         private const int SyncDedupCacheSize = 128;
         private readonly ulong[] _syncDedupAddresses;
         private readonly ulong[] _syncDedupSizes;
         private readonly uint[] _syncDedupEpochs;
         private uint _syncDedupEpoch;
+        private ulong _syncDedupRanges;
+        private ulong _syncDedupHits;
+        private ulong _syncDedupCommits;
 
         /// <summary>
         /// Holds shader stage buffer state and binding information.
@@ -86,6 +89,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 Buffers.AsSpan().Fill(new BufferBounds(new MultiRange(MemoryManager.PteUnmapped, 0UL)));
             }
 
+            /// <summary>
+            /// Checks if a virtual buffer range is already translated for a binding.
+            /// </summary>
             public bool MatchesVirtualRange(int index, ulong gpuVa, ulong size)
             {
                 return _virtualRangesValid[index] &&
@@ -93,6 +99,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
                        _gpuSizes[index] == size;
             }
 
+            /// <summary>
+            /// Records the virtual range that produced the current physical bounds.
+            /// </summary>
             public void SetVirtualRange(int index, ulong gpuVa, ulong size)
             {
                 _gpuAddresses[index] = gpuVa;
@@ -100,6 +109,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 _virtualRangesValid[index] = true;
             }
 
+            /// <summary>
+            /// Invalidates translated ranges after the GPU virtual address map changes.
+            /// </summary>
             public void InvalidateVirtualRanges()
             {
                 Array.Clear(_virtualRangesValid);
@@ -187,6 +199,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
             _syncDedupEpochs = new uint[SyncDedupCacheSize];
         }
 
+        /// <summary>
+        /// Invalidates cached virtual-to-physical uniform buffer translations.
+        /// </summary>
         public void InvalidateVirtualBindings()
         {
             _cpUniformBuffers.InvalidateVirtualRanges();
@@ -195,92 +210,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
             {
                 _gpUniformBuffers[index].InvalidateVirtualRanges();
             }
-        }
-
-        // NEOV2-ARRAYFB1: host storage buffer where bindless texture array accesses record the pool index they sample.
-        // Bounds with this flag (never set by the guest) are bound to that buffer instead of guest memory.
-        private const BufferUsageFlags TextureArrayFeedbackFlag = (BufferUsageFlags)0x80;
-        private const int TextureArrayFeedbackBytes = TextureArrayFeedback.MaxEntries * sizeof(uint);
-
-        private BufferHandle _textureArrayFeedbackBuffer;
-        private PinnedSpan<byte> _textureArrayFeedbackData;
-        private bool _textureArrayFeedbackReady;
-        private bool _textureArrayFeedbackFailed;
-
-        private static BufferBounds TextureArrayFeedbackBounds =>
-            new(new MultiRange(MemoryManager.PteUnmapped, 0UL), TextureArrayFeedbackFlag | BufferUsageFlags.Write);
-
-        private BufferRange GetTextureArrayFeedbackRange()
-        {
-            EnsureTextureArrayFeedbackBuffer();
-
-            return _textureArrayFeedbackBuffer == BufferHandle.Null
-                ? BufferRange.Empty
-                : new BufferRange(_textureArrayFeedbackBuffer, 0, TextureArrayFeedbackBytes, write: true);
-        }
-
-        private void EnsureTextureArrayFeedbackBuffer()
-        {
-            if (_textureArrayFeedbackBuffer != BufferHandle.Null || _textureArrayFeedbackFailed)
-            {
-                return;
-            }
-
-            try
-            {
-                _textureArrayFeedbackBuffer = _context.Renderer.CreateBuffer(TextureArrayFeedbackBytes, BufferAccess.HostMemory);
-                _context.Renderer.SetBufferData(_textureArrayFeedbackBuffer, 0, new byte[TextureArrayFeedbackBytes]);
-
-                // Host memory buffers are persistently mapped: keep the span and read it without synchronizing with the GPU.
-                _textureArrayFeedbackData = _context.Renderer.GetBufferData(_textureArrayFeedbackBuffer, 0, TextureArrayFeedbackBytes);
-                _textureArrayFeedbackReady = _textureArrayFeedbackData.Get().Length == TextureArrayFeedbackBytes;
-            }
-            catch (Exception)
-            {
-                _textureArrayFeedbackFailed = true;
-                _textureArrayFeedbackReady = false;
-            }
-        }
-
-        /// <summary>
-        /// NEOV2-ARRAYFB1: gets the pool indices sampled by bindless texture arrays (non-zero = used at least once).
-        /// </summary>
-        public bool TryGetTextureArrayFeedback(out ReadOnlySpan<uint> feedback)
-        {
-            if (!_textureArrayFeedbackReady)
-            {
-                feedback = default;
-                return false;
-            }
-
-            feedback = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(_textureArrayFeedbackData.Get());
-            return true;
-        }
-
-        /// <summary>
-        /// NEOV2-ARRAYFB1: binds the texture array feedback buffer to a graphics storage buffer slot.
-        /// </summary>
-        public void SetGraphicsTextureArrayFeedback(int stage, int index)
-        {
-            BuffersPerStage buffers = _gpStorageBuffers[stage];
-            BufferBounds bounds = TextureArrayFeedbackBounds;
-
-            if (!buffers.Buffers[index].Equals(bounds))
-            {
-                _gpStorageBuffersDirty = true;
-            }
-
-            buffers.SetBounds(index, bounds.Range, bounds.Flags);
-        }
-
-        /// <summary>
-        /// NEOV2-ARRAYFB1: binds the texture array feedback buffer to a compute storage buffer slot.
-        /// </summary>
-        public void SetComputeTextureArrayFeedback(int index)
-        {
-            BufferBounds bounds = TextureArrayFeedbackBounds;
-
-            _cpStorageBuffers.SetBounds(index, bounds.Range, bounds.Flags);
         }
 
         /// <summary>
@@ -292,6 +221,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
         public void SetIndexBuffer(ulong gpuVa, ulong size, IndexType type)
         {
             MultiRange range = _channel.MemoryManager.Physical.BufferCache.TranslateAndCreateBuffer(_channel.MemoryManager, gpuVa, size, BufferStage.IndexBuffer);
+
+            if (_indexBuffer.Range.Equals(range) && _indexBuffer.Type == type)
+            {
+                return;
+            }
 
             _indexBuffer.Range = range;
             _indexBuffer.Type = type;
@@ -323,9 +257,18 @@ namespace Ryujinx.Graphics.Gpu.Memory
         {
             MultiRange range = _channel.MemoryManager.Physical.BufferCache.TranslateAndCreateBuffer(_channel.MemoryManager, gpuVa, size, BufferStage.VertexBuffer);
 
-            _vertexBuffers[index].Range = range;
-            _vertexBuffers[index].Stride = stride;
-            _vertexBuffers[index].Divisor = divisor;
+            ref VertexBuffer vertexBuffer = ref _vertexBuffers[index];
+
+            if (vertexBuffer.Range.Equals(range) &&
+                vertexBuffer.Stride == stride &&
+                vertexBuffer.Divisor == divisor)
+            {
+                return;
+            }
+
+            vertexBuffer.Range = range;
+            vertexBuffer.Stride = stride;
+            vertexBuffer.Divisor = divisor;
 
             _vertexBuffersDirty = true;
 
@@ -438,7 +381,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="size">Size in bytes of the storage buffer</param>
         public void SetComputeUniformBuffer(int index, ulong gpuVa, ulong size)
         {
-            if (_hugareOptimizations && _cpUniformBuffers.MatchesVirtualRange(index, gpuVa, size))
+            if (_cpUniformBuffers.MatchesVirtualRange(index, gpuVa, size))
             {
                 return;
             }
@@ -461,14 +404,14 @@ namespace Ryujinx.Graphics.Gpu.Memory
         {
             BuffersPerStage buffers = _gpUniformBuffers[stage];
 
-            if (_hugareOptimizations && buffers.MatchesVirtualRange(index, gpuVa, size))
+            if (buffers.MatchesVirtualRange(index, gpuVa, size))
             {
                 return;
             }
 
             MultiRange range = _channel.MemoryManager.Physical.BufferCache.TranslateAndCreateBuffer(_channel.MemoryManager, gpuVa, size, BufferStageUtils.FromShaderStage(stage));
 
-            if (!_hugareOptimizations || !buffers.Buffers[index].Range.Equals(range))
+            if (!buffers.Buffers[index].Range.Equals(range))
             {
                 _gpUniformBuffersDirty = true;
             }
@@ -878,7 +821,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
             }
             else
             {
-                UpdateBuffers(_gpUniformBuffers, deduplicate: _hugareOptimizations);
+                UpdateBuffers(_gpUniformBuffers, deduplicate: true);
             }
 
             CommitBufferTextureBindings(bufferCache);
@@ -911,12 +854,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
                     ref BufferDescriptor bindingInfo = ref buffers.Bindings[index];
 
                     BufferBounds bounds = buffers.Buffers[bindingInfo.Slot];
-
-                    if (isStorage && (bounds.Flags & TextureArrayFeedbackFlag) != 0)
-                    {
-                        ranges[rangesCount++] = new BufferAssignment(bindingInfo.Binding, GetTextureArrayFeedbackRange());
-                        continue;
-                    }
 
                     if (!bounds.IsUnmapped)
                     {
@@ -962,12 +899,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
                 BufferBounds bounds = buffers.Buffers[bindingInfo.Slot];
 
-                if (isStorage && (bounds.Flags & TextureArrayFeedbackFlag) != 0)
-                {
-                    ranges[rangesCount++] = new BufferAssignment(bindingInfo.Binding, GetTextureArrayFeedbackRange());
-                    continue;
-                }
-
                 if (!bounds.IsUnmapped)
                 {
                     bool isWrite = (bounds.Flags & BufferUsageFlags.Write) == BufferUsageFlags.Write;
@@ -1008,6 +939,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// Updates data for the already bound buffer bindings.
         /// </summary>
         /// <param name="bindings">Bindings to update</param>
+        /// <param name="deduplicate">True to synchronize identical single ranges only once</param>
         private void UpdateBuffers(BuffersPerStage[] bindings, bool deduplicate)
         {
             uint syncEpoch = 0;
@@ -1022,6 +954,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
                     syncEpoch = ++_syncDedupEpoch;
                 }
             }
+
+            ulong rangeCount = 0;
+            ulong hitCount = 0;
 
             for (ShaderStage stage = ShaderStage.Vertex; stage <= ShaderStage.Fragment; stage++)
             {
@@ -1043,10 +978,13 @@ namespace Ryujinx.Graphics.Gpu.Memory
                         MemoryRange range = bounds.Range.GetSubRange(0);
                         int hash = (int)(((range.Address >> 4) ^ range.Size ^ (range.Size >> 32)) & (SyncDedupCacheSize - 1));
 
+                        rangeCount++;
+
                         if (_syncDedupEpochs[hash] == syncEpoch &&
                             _syncDedupAddresses[hash] == range.Address &&
                             _syncDedupSizes[hash] == range.Size)
                         {
+                            hitCount++;
                             continue;
                         }
 
@@ -1056,6 +994,18 @@ namespace Ryujinx.Graphics.Gpu.Memory
                     }
 
                     _channel.MemoryManager.Physical.BufferCache.SynchronizeBufferRange(bounds.Range);
+                }
+            }
+
+            if (deduplicate)
+            {
+                _syncDedupRanges += rangeCount;
+                _syncDedupHits += hitCount;
+                ulong commits = ++_syncDedupCommits;
+
+                if ((commits & 0xffff) == 0)
+                {
+                    Logger.Info?.Print(LogClass.Gpu, $"[NEOV2-BUFFER-SYNCDEDUP1] commits={commits} ranges={_syncDedupRanges} hits={_syncDedupHits}");
                 }
             }
         }

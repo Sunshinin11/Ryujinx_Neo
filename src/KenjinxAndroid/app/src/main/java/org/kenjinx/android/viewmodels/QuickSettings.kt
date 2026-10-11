@@ -47,7 +47,7 @@ class QuickSettings(val activity: Activity) {
     var vSyncMode: VSyncMode
     var useNce: Boolean
     var memoryConfiguration: MemoryConfiguration
-    var memorySlackEnabled: Boolean
+    var memorySlack: MemorySlack
     var useVirtualController: Boolean
     // Amiibo slots (URIs + names)
     var amiibo1Uri: String?
@@ -63,41 +63,7 @@ class QuickSettings(val activity: Activity) {
 
     var memoryManagerMode: MemoryManagerMode
     var enableShaderCache: Boolean
-    var enableShaderLoopSafety: Boolean
     var enableTextureRecompression: Boolean
-    var enableVtgViaCompute: Boolean
-
-    // NEOV2 NCE-PROT1: protecao de memoria NCE (corrige tela preta, ex.: MUA3). Desligada por padrao.
-    var enableNceTrackingProtection: Boolean
-
-    // NEOV2 DMA-RELAX1: copia DMA relaxada (como o Eden). Desligada por padrao.
-        var enableRelaxedDmaCopy: Boolean
-
-    // NEOV2-VP9EDEN1: VP9 pelo FFmpeg (como o Eden). Ligado por padrao na Current (Zelda LA); pode ser desligado por jogo.
-    var enableVp9FFmpeg: Boolean
-
-    // NEOV2-GPUMEM1: memoria de GPU estilo Eden. Ligada por padrao; pode ser desligada por jogo.
-    var enableEdenGpuMemory: Boolean
-
-    var enableHugareOptimizations: Boolean
-
-    // NEOV2-AUDIO1: amplificacao do audio (1.0 = 100%, 2.0 = 200%).
-    var audioBoost: Float
-
-    var enableRejectUnmappedDescriptors: Boolean
-    var enableAsyncLarge3DUpload: Boolean
-
-    // Opcao "Otimizacoes de GPU" (padrao ligado; alterada so pela configuracao por jogo).
-    var enableGpuOptimizations: Boolean
-
-    // NEOV2 AUTOFLUSH1: 0 = Padrao, 1 = Reduzido, 2 = Desativado.
-    var drawFlushMode: Int
-
-    // NEOV2 BUFFER-READBACK1: 0 = Padrao, 1 = Relaxada.
-    var bufferReadbackMode: Int
-
-    // NEOV2 STRICT-SYNC1: 0 = Padrao, 1 = Imediata.
-    var strictSyncMode: Int
     var enableMacroHLE: Boolean
     var stretchToFullscreen: Boolean
     var resScale: Float
@@ -105,9 +71,7 @@ class QuickSettings(val activity: Activity) {
     var isGrid: Boolean
     var useSwitchLayout: Boolean
     var enableMotion: Boolean
-
     var enablePerformanceMode: Boolean
-    var showPerformanceOverlay: Boolean
     var controllerStickSensitivity: Float
 
     // --- Controller Scale (0.5f..1.5f, Default 1.0f)
@@ -129,14 +93,6 @@ class QuickSettings(val activity: Activity) {
     private var sharedPref: SharedPreferences = PreferenceManager.getDefaultSharedPreferences(activity)
 
     init {
-        // NEO UI refresh: use the conventional Android/Xbox face-button order once.
-        // The preference remains user-selectable after this migration.
-        if (!sharedPref.getBoolean("neoFaceButtonDefaultV1", false)) {
-            sharedPref.edit {
-                putBoolean("useSwitchLayout", false)
-                putBoolean("neoFaceButtonDefaultV1", true)
-            }
-        }
         // Load Amiibo slots
         amiibo1Uri = sharedPref.getString("amiibo1Uri", null)
         amiibo1Name = sharedPref.getString("amiibo1Name", null)
@@ -162,13 +118,7 @@ class QuickSettings(val activity: Activity) {
         memoryManagerMode = MemoryManagerMode.entries.toTypedArray()[sharedPref.getInt("memoryManagerMode", MemoryManagerMode.HostMappedUnsafe.ordinal)]
         useNce = sharedPref.getBoolean("useNce", false)
         memoryConfiguration = MemoryConfiguration.entries.toTypedArray()[sharedPref.getInt("memoryConfiguration", MemoryConfiguration.MemoryConfiguration4GiB.ordinal)]
-        // NEOV2: migrate the former 0/4/8/12 GiB selector to a simple 0/12 GiB switch.
-        // Any previously enabled slack value becomes the supported 12 GiB mode.
-        memorySlackEnabled = if (sharedPref.contains("memorySlackEnabled")) {
-            sharedPref.getBoolean("memorySlackEnabled", true)
-        } else {
-            sharedPref.getInt("memorySlack", 3) != 0
-        }
+        memorySlack = MemorySlack.entries.toTypedArray()[sharedPref.getInt("memorySlack", MemorySlack.Slack12GiB.ordinal)]
         vSyncMode = VSyncMode.entries.toTypedArray()[sharedPref.getInt("vSyncMode", VSyncMode.Switch.ordinal)]
         enableDocked = sharedPref.getBoolean("enableDocked", true)
         enablePptc = sharedPref.getBoolean("enablePptc", true)
@@ -178,18 +128,7 @@ class QuickSettings(val activity: Activity) {
         fsGlobalAccessLogMode = sharedPref.getInt("fsGlobalAccessLogMode", 0)
         ignoreMissingServices = sharedPref.getBoolean("ignoreMissingServices", false)
         enableShaderCache = sharedPref.getBoolean("enableShaderCache", true)
-        enableShaderLoopSafety = sharedPref.getBoolean("enableShaderLoopSafety", false)
         enableTextureRecompression = sharedPref.getBoolean("enableTextureRecompression", false)
-        enableVtgViaCompute = sharedPref.getBoolean("enableVtgViaCompute", true)
-        enableNceTrackingProtection = sharedPref.getBoolean("enableNceTrackingProtection", false)
-        enableRelaxedDmaCopy = sharedPref.getBoolean("enableRelaxedDmaCopy", false)
-        enableVp9FFmpeg = sharedPref.getBoolean("enableVp9FFmpeg", true)
-        enableEdenGpuMemory = sharedPref.getBoolean("enableEdenGpuMemory", true)
-        enableHugareOptimizations = sharedPref.getBoolean("enableHugareOptimizations", false)
-        audioBoost = sharedPref.getFloat("audioBoost", 1f).coerceIn(1f, 2f)
-        drawFlushMode = sharedPref.getInt("drawFlushMode", 0)
-        bufferReadbackMode = sharedPref.getInt("bufferReadbackMode", 0)
-        strictSyncMode = sharedPref.getInt("strictSyncMode", 0)
         enableMacroHLE = sharedPref.getBoolean("enableMacroHLE", true)
         stretchToFullscreen = sharedPref.getBoolean("stretchToFullscreen", false)
         resScale = sharedPref.getFloat("resScale", 1f)
@@ -199,41 +138,21 @@ class QuickSettings(val activity: Activity) {
             sharedPref.getInt("virtualControllerPreset", VirtualControllerPreset.Default.ordinal)
         ]
         isGrid = sharedPref.getBoolean("isGrid", true)
-        useSwitchLayout = sharedPref.getBoolean("useSwitchLayout", false)
+        useSwitchLayout = sharedPref.getBoolean("useSwitchLayout", true)
         enableMotion = sharedPref.getBoolean("enableMotion", true)
         enablePerformanceMode = sharedPref.getBoolean("enablePerformanceMode", true)
-        showPerformanceOverlay = sharedPref.getBoolean("showPerformanceOverlay", false)
         controllerStickSensitivity = sharedPref.getFloat("controllerStickSensitivity", 1.0f)
 
         // --- Reload: Controller Scale
         controllerScale = sharedPref.getFloat("controllerScale", 1.0f).coerceIn(0.5f, 1.5f)
 
-        enableRejectUnmappedDescriptors = sharedPref.getBoolean("enableRejectUnmappedDescriptors", false)
-        enableAsyncLarge3DUpload = sharedPref.getBoolean("enableAsyncLarge3DUpload", true)
-        enableGpuOptimizations = sharedPref.getBoolean("enableGpuOptimizations", true)
-
-        if (!sharedPref.getBoolean("neoLogsDefaultOffV1", false)) {
-            sharedPref.edit {
-                putBoolean("enableStubLogs", false)
-                putBoolean("enableInfoLogs", false)
-                putBoolean("enableWarningLogs", false)
-                putBoolean("enableErrorLogs", false)
-                putBoolean("enableGuestLogs", false)
-                putBoolean("enableFsAccessLogs", false)
-                putBoolean("enableTraceLogs", false)
-                putBoolean("enableDebugLogs", false)
-                putBoolean("enableGraphicsLogs", false)
-                putBoolean("neoLogsDefaultOffV1", true)
-            }
-        }
-
         enableStubLogs = sharedPref.getBoolean("enableStubLogs", false)
-        enableInfoLogs = sharedPref.getBoolean("enableInfoLogs", false)
-        enableWarningLogs = sharedPref.getBoolean("enableWarningLogs", false)
-        enableErrorLogs = sharedPref.getBoolean("enableErrorLogs", false)
-        enableGuestLogs = sharedPref.getBoolean("enableGuestLogs", false)
+        enableInfoLogs = sharedPref.getBoolean("enableInfoLogs", true)
+        enableWarningLogs = sharedPref.getBoolean("enableWarningLogs", true)
+        enableErrorLogs = sharedPref.getBoolean("enableErrorLogs", true)
+        enableGuestLogs = sharedPref.getBoolean("enableGuestLogs", true)
         enableFsAccessLogs = sharedPref.getBoolean("enableFsAccessLogs", false)
-        enableTraceLogs = sharedPref.getBoolean("enableTraceLogs", false)
+        enableTraceLogs = sharedPref.getBoolean("enableStubLogs", false)
         enableDebugLogs = sharedPref.getBoolean("enableDebugLogs", false)
         enableGraphicsLogs = sharedPref.getBoolean("enableGraphicsLogs", false)
 
@@ -265,8 +184,7 @@ class QuickSettings(val activity: Activity) {
             putInt("memoryManagerMode", memoryManagerMode.ordinal)
             putBoolean("useNce", useNce)
             putInt("memoryConfiguration", memoryConfiguration.ordinal)
-            putBoolean("memorySlackEnabled", memorySlackEnabled)
-            remove("memorySlack")
+            putInt("memorySlack", memorySlack.ordinal)
             putInt("vSyncMode", vSyncMode.ordinal)
             putBoolean("enableDocked", enableDocked)
             putBoolean("enablePptc", enablePptc)
@@ -276,21 +194,7 @@ class QuickSettings(val activity: Activity) {
             putInt("fsGlobalAccessLogMode", fsGlobalAccessLogMode)
             putBoolean("ignoreMissingServices", ignoreMissingServices)
             putBoolean("enableShaderCache", enableShaderCache)
-            putBoolean("enableShaderLoopSafety", enableShaderLoopSafety)
             putBoolean("enableTextureRecompression", enableTextureRecompression)
-            putBoolean("enableVtgViaCompute", enableVtgViaCompute)
-            putBoolean("enableNceTrackingProtection", enableNceTrackingProtection)
-            putBoolean("enableRelaxedDmaCopy", enableRelaxedDmaCopy)
-            putBoolean("enableVp9FFmpeg", enableVp9FFmpeg)
-            putBoolean("enableEdenGpuMemory", enableEdenGpuMemory)
-            putBoolean("enableHugareOptimizations", enableHugareOptimizations)
-            putFloat("audioBoost", audioBoost)
-            putBoolean("enableRejectUnmappedDescriptors", enableRejectUnmappedDescriptors)
-            putBoolean("enableAsyncLarge3DUpload", enableAsyncLarge3DUpload)
-            putBoolean("enableGpuOptimizations", enableGpuOptimizations)
-            putInt("drawFlushMode", drawFlushMode)
-            putInt("bufferReadbackMode", bufferReadbackMode)
-            putInt("strictSyncMode", strictSyncMode)
             putBoolean("enableMacroHLE", enableMacroHLE)
             putBoolean("stretchToFullscreen", stretchToFullscreen)
             putFloat("resScale", resScale)
@@ -300,7 +204,6 @@ class QuickSettings(val activity: Activity) {
             putBoolean("useSwitchLayout", useSwitchLayout)
             putBoolean("enableMotion", enableMotion)
             putBoolean("enablePerformanceMode", enablePerformanceMode)
-            putBoolean("showPerformanceOverlay", showPerformanceOverlay)
             putFloat("controllerStickSensitivity", controllerStickSensitivity)
 
             // --- Save Controller Scale

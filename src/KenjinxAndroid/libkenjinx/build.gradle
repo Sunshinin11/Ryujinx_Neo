@@ -13,9 +13,7 @@ def toolchainPath = providers.gradleProperty("org.kenjinx.llvm.toolchain.path").
 // See: https://docs.gradle.org/current/userguide/directory_layout.html#dir:gradle_user_home
 def dotnetExecutable = providers.gradleProperty("org.kenjinx.dotnet.bin").getOrElse("dotnet")
 // Build configuration
-def isReleaseTask = gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") }
-def defaultConf = isReleaseTask ? "release" : "debug"
-def configuration = providers.gradleProperty("org.kenjinx.config").getOrElse(defaultConf).toLowerCase()
+def configuration = providers.gradleProperty("org.kenjinx.config").getOrElse("debug").toLowerCase()
 // Publish directory
 def publishDirectory = providers.gradleProperty("org.kenjinx.publish.path").getOrNull()
 // Should the symbols be stripped from the published library?

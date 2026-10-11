@@ -1,98 +1,126 @@
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="Imagens/Ryujinx%20Neo%20Logo.png">
-    <img src="Imagens/Ryujinx%20Neo%20Logo%20Escura.png" alt="Logo do Ryujinx Neo" width="360">
-  </picture>
+<h1 align="center">
+  <br>
+  <img src="https://git.ryujinx.app/projects/Kenji-NX/raw/branch/master/distribution/misc/Logo.png" alt="Kenji-NX">
+  <br>
+  <b>Kenji-NX</b>
+  <br>
 
-  <h1>Ryujinx Neo</h1>
-  <p><strong>Um projeto pessoal e experimental de emulação de Nintendo Switch para Android.</strong></p>
-</div>
+[![Latest Desktop Release](https://git.ryujinx.app/projects/Kenji-NX/badges/release.svg?label=desktop)](https://git.ryujinx.app/projects/Kenji-NX/releases/latest)
+[![Latest Android Release](https://git.ryujinx.app/Kenji-NX/android/badges/release.svg?label=android)](https://git.ryujinx.app/Kenji-NX/android/releases/latest)
+<br>
+[![Discord](https://img.shields.io/discord/1294443224030511104?color=5865F2&label=Kenji-NX&logo=discord&logoColor=white)](https://discord.gg/zBSAuZfKqe)
 
-> [!IMPORTANT]
-> Este é um fork independente. Não é uma versão oficial do Ryujinx, do Kenji-NX, do Ryubing ou do Eden e não tem vínculo com a Nintendo. O projeto não inclui jogos, firmware, chaves ou conteúdo protegido de terceiros.
+</h1>
 
-## Galeria de jogos
+Kenji-NX is an open-source Nintendo Switch emulator, originally created by gdkchan, written in C#.
+This emulator aims at providing excellent accuracy and performance, a user-friendly interface and consistent builds.
+It was written from scratch and development on the project began in September 2017.
+Kenji-NX is available on GitHub under the [MIT license](LICENSE.txt).
 
-Capturas reais dos meus testes do Ryujinx Neo no Android com jogos que não funcionavam no Eden no meu aparelho. O FPS mostrado em cada imagem é uma leitura instantânea, não uma média de desempenho.
+On October 1st 2024, Ryujinx was discontinued as the creator was forced to abandon the project.
 
-<table>
-  <tr>
-    <td width="50%" align="center"><a href="Imagens/Prints/Screenshot_20260927-183800.webp"><img src="Imagens/Prints/Screenshot_20260927-183800.webp" alt="DOOM (2016) em gameplay, com texturas e efeitos renderizados" width="100%"></a></td>
-    <td width="50%" align="center"><a href="Imagens/Prints/Screenshot_20260928-011337.webp"><img src="Imagens/Prints/Screenshot_20260928-011337.webp" alt="Jogo de ficção científica em primeira pessoa em gameplay" width="100%"></a></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><a href="Imagens/Prints/Screenshot_20260926-162507.webp"><img src="Imagens/Prints/Screenshot_20260926-162507.webp" alt="Aventura de Zelda em gameplay sob chuva" width="100%"></a></td>
-    <td width="50%" align="center"><a href="Imagens/Prints/Screenshot_20260928-010644.webp"><img src="Imagens/Prints/Screenshot_20260928-010644.webp" alt="The Legend of Zelda: Link’s Awakening em gameplay" width="100%"></a></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><a href="Imagens/Prints/Screenshot_20260928-011001.webp"><img src="Imagens/Prints/Screenshot_20260928-011001.webp" alt="Mortal Kombat 11 em uma luta" width="100%"></a></td>
-    <td width="50%" align="center"><a href="Imagens/Prints/Screenshot_20260925-230950.webp"><img src="Imagens/Prints/Screenshot_20260925-230950.webp" alt="Jogo de luta com Athena e Mai em gameplay" width="100%"></a></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><a href="Imagens/Prints/Screenshot_20260927-153807.webp"><img src="Imagens/Prints/Screenshot_20260927-153807.webp" alt="Mario + Rabbids Kingdom Battle na tela inicial" width="100%"></a></td>
-    <td width="50%" align="center"><a href="Imagens/Prints/Screenshot_20260928-011206.webp"><img src="Imagens/Prints/Screenshot_20260928-011206.webp" alt="Jogo Pokémon em exploração de cidade" width="100%"></a></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><a href="Imagens/Prints/Screenshot_20260926-162916.webp"><img src="Imagens/Prints/Screenshot_20260926-162916.webp" alt="Marvel Ultimate Alliance 3 em gameplay" width="100%"></a></td>
-    <td width="50%" align="center"><a href="Imagens/Prints/Screenshot_20260927-143011.webp"><img src="Imagens/Prints/Screenshot_20260927-143011.webp" alt="Jogo de ação em pixel art em gameplay" width="100%"></a></td>
-  </tr>
-</table>
+This fork is not a Ryujinx revival project; it aims to be a middle ground between GreemDev's [Ryujinx](https://git.ryujinx.app/projects/Ryubing) fork and the more preservative [ryujinx-mirror](https://git.ryujinx.app/archive/ryujinx-mirror) fork.
+It brings over many of the front-facing features from the aforementioned forks with *additional* contributions from KeatonTheBot and others.
 
-**DOOM (2016)** é um caso especial: o Kenji-NX não iniciava o jogo e, nos meus testes, o Eden não renderizava suas texturas. No Neo, a cena aparece renderizada no registro acima.
+## Compatibility
 
-## Por que o projeto nasceu
+As of May 2024, Ryujinx has been tested on approximately 4,300 titles;
+over 4,100 boot past menus and into gameplay, with roughly 3,550 of those being considered playable.
 
-O Ryujinx Neo começou por um motivo simples e pessoal: eu queria jogar alguns títulos que, no meu aparelho e na versão do Eden que eu utilizava, não rodavam como eu precisava. A linha Android do Kenji-NX oferecia outro caminho técnico. Passei a estudá-la, testar hipóteses e adaptar o código para os jogos e dispositivos que tenho à mão.
+Anyone is free to submit a new game test or update an existing game test entry;
+simply follow the new issue template and testing guidelines, or post as a reply to the applicable game issue.
+Use the search function to see if a game has been tested already!
 
-O nome **Neo** representa esse trabalho de evolução experimental: ajustes de NCE, GPU/Vulkan, compatibilidade por jogo e uma interface Android própria. O objetivo é aprender, melhorar a experiência e compartilhar o que funcionar, sem prometer compatibilidade universal nem desempenho igual em todo aparelho.
+## Usage
 
-Este é um **projeto pessoal**, mantido no meu tempo livre. Não é um produto comercial nem uma continuação oficial de qualquer projeto citado aqui.
+To run this emulator, your PC must be equipped with at least 8GiB of RAM;
+failing to meet this requirement may result in a poor gameplay experience or unexpected crashes.
 
-## De onde vem o código
+## Latest build
 
-A origem deve ficar clara:
+<s>These builds are compiled automatically for each commit on the master branch.
+While we strive to ensure optimal stability and performance prior to pushing an update, our automated builds **may be unstable or completely broken**.</s>
 
-| Projeto | Relação com o Ryujinx Neo |
-| --- | --- |
-| [Ryujinx](https://github.com/Ryujinx) | Projeto original do emulador, criado por **gdkchan**. Sua arquitetura e o trabalho de seus contribuidores formam a base histórica. |
-| [Kenji-NX](https://github.com/Kenji-NX) | Base direta deste fork, especialmente a linha Android/Bionic. O README antigo do Kenji-NX ainda estava neste repositório quando o Neo foi iniciado. O [endereço histórico do código](https://git.ryujinx.app/projects/Kenji-NX) pode não estar disponível. |
-| [Ryubing](https://github.com/Ryubing) | Continuidade comunitária do ecossistema Ryujinx; correções e comportamento são estudados como referência quando relevantes. |
-| [Eden](https://git.eden-emu.dev/eden-emu/eden/) | Referência técnica para algumas ideias e comparações de CPU/GPU. Também foi parte da motivação pessoal para experimentar outro caminho em jogos que não funcionavam no meu contexto. |
-| [Strato](https://github.com/strato-emu/strato) e experimentos anteriores do Neo/Gezinjinx | Referências de estudo e comparação em Android, NCE e gráficos; a presença nesta lista não significa que todo o código desses projetos foi incorporado. |
-| [Mesa/Turnip](https://gitlab.freedesktop.org/mesa/mesa) e [Vulkan](https://www.khronos.org/vulkan/) | Drivers, API e documentação usados para investigar o backend gráfico. |
+Automated builds are temporarily disabled, but builds for all platforms will be manually compiled and uploaded until the workflows are fixed.
 
-As mudanças próprias do Neo são rastreáveis pelo [histórico da branch `neo-v2-nce2`](https://github.com/Sunshinin11/Ryujinx_Neo/commits/neo-v2-nce2). Quando uma ideia ou implementação vem de outro projeto, procuro registrar essa origem nos commits. Os créditos originais e as licenças permanecem válidos; consulte [LICENSE.txt](LICENSE.txt) e [THIRDPARTY.md](distribution/legal/THIRDPARTY.md).
+## Documentation
 
-## Transparência sobre o desenvolvimento: vibe coding
+If you are planning to contribute or just want to learn more about this project please read through our [documentation](docs/README.md).
 
-**Sim, este projeto usa vibe coding e ferramentas de inteligência artificial.** Eu as uso para estudar código, comparar abordagens, propor e implementar mudanças, revisar erros e escrever documentação. Isso faz parte do processo e não será escondido nem apresentado como trabalho inteiramente escrito à mão.
+## Building
 
-Eu defino os problemas que quero resolver, escolho o que experimentar e testo os resultados nos aparelhos e jogos aos quais tenho acesso. Assistência de IA não garante que uma mudança esteja correta. Uma parte do código pode ser experimental, conter regressões ou ainda carecer de validação ampla. Por isso, o repositório mantém histórico, opções por jogo e documentação dos resultados positivos **e negativos**.
+If you wish to build the emulator yourself, follow these steps:
 
-Contribuições de outras pessoas, bases herdadas e referências externas devem receber seus devidos créditos. Se você encontrar uma atribuição ausente ou incorreta, abra uma issue indicando o trecho e a fonte.
+### Step 1
 
-## O que o Neo acrescenta
+Install the [.NET 10.0 (or higher) SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
+Make sure your SDK version is higher or equal to the required version specified in [global.json](global.json).
 
-- Interface Android em português, identidade visual e logo próprios, biblioteca nos modos **NEO** e **Switch**, perfis por jogo e menu rápido durante a emulação.
-- Melhorias experimentais no backend Vulkan/Turnip: submissões, sincronização, cache, formatos de textura e uso do backend em núcleos rápidos quando aplicável.
-- Trabalho em **NCE Neo 2**, proteção de memória opcional e ajustes de compatibilidade para jogos específicos.
-- Controles globais e por jogo para NCE/JIT, modo Dock/Portátil, Memory Slack, shaders, VSync, resolução, driver gráfico e outras opções.
-- Gerenciador de drivers Vulkan com seleção do driver do sistema ou personalizado, catálogo de download e verificações de integridade dos pacotes.
-- Gerenciamento de atualizações, DLCs, mods, cheats, saves, Amiibo e caches pela interface.
+### Step 2
 
-O [CHANGELOG.md](CHANGELOG.md) detalha o que foi adicionado, corrigido e observado. Algumas opções existem justamente para que uma otimização possa ser desligada em um jogo com regressão.
+Either use `git clone https://git.ryujinx.app/projects/Kenji-NX` on the command line to clone the repository or use Code --> Download zip button to get the files.
 
-## Estado do projeto
+### Step 3
 
-A versão Android identificada no código desta branch é **0.0.1**. O desenvolvimento é experimental e voltado sobretudo a Android ARM64 e Vulkan/Adreno. Resultados relatados para um jogo, driver e aparelho não devem ser tratados como garantia para outros. Consulte os commits e o changelog para saber o estado de cada ajuste.
+To build Kenji-NX, open a command prompt inside the project directory.
+You can quickly access it on Windows by holding shift in File Explorer, then right clicking and selecting `Open command window here`.
+Then type the following command: `dotnet build -c Release -o build`
+the built files will be found in the newly created build directory.
 
-O código-fonte, por si só, não comprova que cada funcionalidade foi testada na última build. Ao relatar um problema, informe o jogo, aparelho, driver, modo NCE/JIT, configurações relevantes, versão ou commit e, se possível, um log.
+System files are stored in the `Ryujinx` folder.
+This folder is located in the user folder, which can be accessed by clicking `Open Ryujinx Folder` under the File menu in the GUI.
 
-## Uso responsável
+## Features
 
-Forneça seus próprios jogos e arquivos de sistema. Este repositório não distribui jogos, firmware, chaves nem APKs de terceiros. Antes de instalar uma build, confira a origem e a versão correspondente ao código.
+- **Audio**
 
-## Licença e agradecimentos
+  Audio output is entirely supported, audio input (microphone) isn't supported.
+  We use C# wrappers for [OpenAL](https://openal-soft.org/), and [SDL2](https://www.libsdl.org/) & [libsoundio](http://libsound.io/) as fallbacks.
 
-O código deste repositório segue a [licença MIT](LICENSE.txt), respeitadas as licenças dos componentes de terceiros em [THIRDPARTY.md](distribution/legal/THIRDPARTY.md). Obrigado a gdkchan e aos contribuidores de Ryujinx, Kenji-NX, Ryubing e dos demais projetos e bibliotecas que tornaram este trabalho possível. O Ryujinx Neo existe sobre essa base; o crédito por ela continua sendo de seus autores.
+- **CPU**
 
+  The CPU emulator, ARMeilleure, emulates an ARMv8 CPU and currently has support for most 64-bit ARMv8 and some of the ARMv7 (and older) instructions, including partial 32-bit support.
+  It translates the ARM code to a custom IR, performs a few optimizations, and turns that into x86 code.
+  There are three memory manager options available depending on the user's preference, leveraging both software-based (slower) and host-mapped modes (much faster).
+  The fastest option (host, unchecked) is set by default.
+  Kenji-NX also features an optional Profiled Persistent Translation Cache, which essentially caches translated functions so that they do not need to be translated every time the game loads.
+  The net result is a significant reduction in load times (the amount of time between launching a game and arriving at the title screen) for nearly every game.
+  NOTE: This feature is enabled by default in the Options menu > System tab.
+  You must launch the game at least twice to the title screen or beyond before performance improvements are unlocked on the third launch!
+  These improvements are permanent and do not require any extra launches going forward.
+
+- **GPU**
+
+  The GPU emulator emulates the Switch's Maxwell GPU using either the OpenGL (version 4.5 minimum), Vulkan, or Metal (via MoltenVK) APIs through a custom build of OpenTK or Silk.NET respectively.
+  There are currently six graphics enhancements available to the end user in Kenji-NX: Disk Shader Caching, Resolution Scaling, Anti-Aliasing, Scaling Filters (including FSR), Anisotropic Filtering and Aspect Ratio Adjustment.
+  These enhancements can be adjusted or toggled as desired in the GUI.
+
+- **Input**
+
+  We currently have support for keyboard, mouse, touch input, JoyCon input support, and nearly all controllers.
+  Motion controls are natively supported in most cases; for dual-JoyCon motion support, DS4Windows or BetterJoy are currently required.
+  In all scenarios, you can set up everything inside the input configuration menu.
+
+- **DLC & Modifications**
+
+  Kenji-NX is able to manage add-on content/downloadable content through the GUI.
+  Mods (romfs, exefs, and runtime mods such as cheats) are also supported;
+  the GUI contains a shortcut to open the respective mods folder for a particular game.
+
+- **Configuration**
+
+  The emulator has settings for enabling or disabling some logging, remapping controllers, and more.
+  You can configure all of them through the graphical interface or manually through the config file, `Config.json`, found in the user folder which can be accessed by clicking `Open Ryujinx Folder` under the File menu in the GUI.
+
+## License
+
+This software is licensed under the terms of the [MIT license](LICENSE.txt).
+This project makes use of code authored by the libvpx project, licensed under BSD and the ffmpeg project, licensed under LGPLv3.
+See [LICENSE.txt](LICENSE.txt) and [THIRDPARTY.md](distribution/legal/THIRDPARTY.md) for more details.
+
+## Credits
+
+- [LibHac](https://git.ryujinx.app/projects/LibHac) is used for our file-system.
+- [AmiiboAPI](https://www.amiiboapi.com) is used in our Amiibo emulation.
+- [ldn_mitm](https://github.com/spacemeowx2/ldn_mitm) is used for one of our available multiplayer modes.
+- [ShellLink](https://github.com/securifybv/ShellLink) is used for Windows shortcut generation.

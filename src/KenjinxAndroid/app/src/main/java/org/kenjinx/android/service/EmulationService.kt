@@ -141,7 +141,7 @@ class EmulationService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setOngoing(true)
-            .setSmallIcon(R.drawable.ic_notification)
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(getString(R.string.app_name))
             .setContentText("Emulation is running…")
             .setContentIntent(pi)

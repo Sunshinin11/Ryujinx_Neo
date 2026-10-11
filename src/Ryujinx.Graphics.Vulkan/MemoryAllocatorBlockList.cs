@@ -18,10 +18,6 @@ namespace Ryujinx.Graphics.Vulkan
             public ulong Size { get; }
             public bool Mapped => HostPointer != nint.Zero;
 
-            // NEOV2-GPUMEM1: bytes reported to GpuMemoryStats for this block.
-            internal long TrackedBytes;
-            internal bool TrackedForBuffer;
-
             private readonly struct Range : IComparable<Range>
             {
                 public ulong Offset { get; }
@@ -158,12 +154,6 @@ namespace Ryujinx.Graphics.Vulkan
                     api.FreeMemory(device, Memory, null);
                     Memory = default;
                 }
-
-                if (TrackedBytes != 0)
-                {
-                    Ryujinx.Graphics.GAL.GpuMemoryStats.Add(-TrackedBytes, TrackedForBuffer);
-                    TrackedBytes = 0;
-                }
             }
         }
 
@@ -230,23 +220,6 @@ namespace Ryujinx.Graphics.Vulkan
                 MemoryTypeIndex = (uint)MemoryTypeIndex,
             };
 
-            // NEOV2-RAMGUARD1: fail fast before Android runs out of RAM and freezes the whole device.
-            if (Ryujinx.Graphics.GAL.GpuMemoryStats.HostRamGuardEnabled &&
-                (long)blockAlignedSize >= Ryujinx.Graphics.GAL.GpuMemoryStats.HostRamGuardMinAllocationBytes)
-            {
-                long available = Ryujinx.Graphics.GAL.GpuMemoryStats.ReadHostAvailableBytesCached();
-
-                if (available >= 0 && available - (long)blockAlignedSize < Ryujinx.Graphics.GAL.GpuMemoryStats.HostRamGuardMinAvailableBytes)
-                {
-                    string message = $"Refusing a {blockAlignedSize / (1024 * 1024)}MB {(ForBuffer ? "buffer" : "image")} GPU allocation: " +
-                        $"Android has {available / (1024 * 1024)}MB free. Closing the emulator instead of freezing the device. {Ryujinx.Graphics.GAL.GpuMemoryStats.Describe()}";
-
-                    Ryujinx.Common.Logging.Logger.Error?.Print(Ryujinx.Common.Logging.LogClass.Gpu, message);
-
-                    throw new OutOfMemoryException(message);
-                }
-            }
-
             _api.AllocateMemory(_device, in memoryAllocateInfo, null, out DeviceMemory deviceMemory).ThrowOnError();
 
             nint hostPointer = nint.Zero;
@@ -259,11 +232,6 @@ namespace Ryujinx.Graphics.Vulkan
             }
 
             Block newBlock = new(deviceMemory, hostPointer, blockAlignedSize);
-
-            // NEOV2-GPUMEM1: account the real device memory, like Eden's GetDeviceMemoryUsage.
-            newBlock.TrackedForBuffer = ForBuffer;
-            newBlock.TrackedBytes = (long)blockAlignedSize;
-            Ryujinx.Graphics.GAL.GpuMemoryStats.Add(newBlock.TrackedBytes, ForBuffer);
 
             InsertBlock(newBlock);
 

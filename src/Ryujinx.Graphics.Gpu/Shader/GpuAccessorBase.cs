@@ -235,9 +235,6 @@ namespace Ryujinx.Graphics.Gpu.Shader
 
         public bool QueryShaderLoopSafetyEnabled() => GraphicsConfig.EnableShaderLoopSafety;
 
-        // NEOV2-GMEMFB1: follows "Memoria de GPU estilo Eden" (the shader cache directory changes with it).
-        public bool QueryGlobalMemoryFallbackEnabled() => GraphicsConfig.EdenGpuMemory;
-
         public bool QueryHostSupportsSnormBufferTextureFormat() => _context.Capabilities.SupportsSnormBufferTextureFormat;
 
         public bool QueryHostSupportsTextureGatherOffsets() => _context.Capabilities.SupportsTextureGatherOffsets;

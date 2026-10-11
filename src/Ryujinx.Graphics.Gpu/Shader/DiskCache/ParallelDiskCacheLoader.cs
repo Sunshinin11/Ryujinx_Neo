@@ -639,7 +639,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
             bool vertexHasStore = translatorContexts[1] != null && translatorContexts[1].HasStore;
             bool geometryHasStore = hasGeometryShader && translatorContexts[4].HasStore;
             bool geometryIsPassthrough = hasGeometryShader && translatorContexts[4].GpPassthrough;
-            bool vertexToCompute = ShouldConvertVertexToCompute(_context, vertexHasStore, geometryHasStore, hasGeometryShader, geometryIsPassthrough);
+
+            bool vertexToCompute = ShouldConvertVertexToCompute(
+                _context,
+                vertexHasStore,
+                geometryHasStore,
+                hasGeometryShader,
+                geometryIsPassthrough);
 
             // We don't support caching shader stages that have been converted to compute currently,
             // so just eliminate them if they exist in the cache.
@@ -666,6 +672,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
                     byte[] guestCode = guestShaders[stageIndex + 1].Value.Code;
                     byte[] cb1Data = guestShaders[stageIndex + 1].Value.Cb1Data;
 
+                    TotkDiagShared.CurrentGuestHash = TotkDiagShared.ShadowTapOne ? TotkDiagShared.Hash(guestCode) : null;
+
                     if (stageIndex == 0 && guestShaders[0].HasValue)
                     {
                         program = currentStage.Translate(translatorContexts[0]);
@@ -682,6 +690,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
 
                         shaders[stageIndex + 1] = new CachedShaderStage(program.Info, guestCode, cb1Data);
                     }
+
+                    TotkDiagShared.CurrentGuestHash = null;
 
                     if (program != null)
                     {

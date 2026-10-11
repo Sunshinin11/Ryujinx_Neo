@@ -2,17 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
-// NEOV2-VP9EDEN1: porte em C# da classe VP9 do Eden (src/video_core/host1x/codecs/vp9.cpp).
-// O NVDEC recebe so os tiles; os cabecalhos VP9 sao recompostos aqui para o FFmpeg.
-// Diferencas deliberadas em relacao ao Eden (todas mantem o bitstream valido):
-//  - cada quadro usa as proprias probabilidades de segmentacao e o proprio PictureInfo
-//    (o Eden lia os registradores do quadro seguinte ao decodificar o anterior);
-//  - delta_q escrito como su(4) com sinal, conforme a especificacao;
-//  - deltas do loop filter e dados de segmentacao sempre enviados por completo
-//    (nao dependem de estado anterior do FFmpeg);
-//  - tamanho explicito nos quadros inter (nao assume o tamanho da referencia LAST);
-//  - modo resiliente zera os contextos como o FFmpeg faz, sem guardar o quadro atual;
-//  - probabilidades iniciais tiradas do proprio decodificador VP9 do Ryujinx (libvpx).
 
 using Ryujinx.Common.Memory;
 using Ryujinx.Graphics.Nvdec.Types.Vp9;
@@ -21,16 +10,16 @@ using System;
 
 namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
 {
-    /// <summary>Um quadro VP9 guardado ate a chegada do quadro seguinte (mesma fila de 1 quadro do Eden).</summary>
     internal struct Vp9FrameContainer
     {
         public PictureInfo Picture;
         public Vp9EntropyProbs Entropy;
-        public Array4<uint> Offsets; // last, golden, altref, current (luma)
+        public Array4<uint> Offsets;
         public byte[] Bitstream;
         public bool ShowFrame;
 
-        public readonly bool IsKeyFrame => Picture.Flags.HasFlag(FrameFlags.IsKeyFrame);
+        public readonly bool IsKeyFrame =>
+            Picture.Flags.HasFlag(FrameFlags.IsKeyFrame);
     }
 
     internal sealed class Vp9HeaderComposer
@@ -38,14 +27,19 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
         private const int DiffUpdateProbability = 252;
         private const uint FrameSyncCode = 0x498342;
 
-        private static readonly Vp9EntropyProbs _defaultProbs = Ryujinx.Graphics.Nvdec.Vp9.Vp9DefaultProbabilities.Create();
+        private static readonly Vp9EntropyProbs _defaultProbs =
+            Ryujinx.Graphics.Nvdec.Vp9.Vp9DefaultProbabilities.Create();
 
-        private readonly Vp9EntropyProbs[] _frameCtxs = new Vp9EntropyProbs[4];
+        private readonly Vp9EntropyProbs[] _frameCtxs =
+            new Vp9EntropyProbs[4];
+
         private Vp9EntropyProbs _prevFrameProbs;
         private bool _swapRefIndices;
 
         private Vp9FrameContainer _next;
         private bool _hasNext;
+
+        private bool _currentIntraOnly;
 
         public Vp9HeaderComposer()
         {
@@ -65,42 +59,65 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
             }
         }
 
-        /// <summary>
-        /// Recebe o quadro submetido agora e devolve o pacote VP9 completo do quadro anterior
-        /// (no primeiro quadro, o proprio quadro atual), como VP9::ComposeFrame do Eden.
-        /// </summary>
-        public byte[] ComposeFrame(in Vp9FrameContainer incoming, out bool showFrame, out bool isKeyFrame)
+        public byte[] ComposeFrame(
+            in Vp9FrameContainer incoming,
+            out bool showFrame,
+            out bool isKeyFrame)
         {
-            Vp9FrameContainer current = GetCurrentFrame(incoming);
+            Vp9FrameContainer current =
+                GetCurrentFrame(incoming);
 
             showFrame = current.ShowFrame;
             isKeyFrame = current.IsKeyFrame;
 
-            VpxBitStreamWriter uncompWriter = ComposeUncompressedHeader(ref current);
-            byte[] compressedHeader = ComposeCompressedHeader(ref current);
+            VpxBitStreamWriter uncompWriter =
+                ComposeUncompressedHeader(ref current);
 
-            uncompWriter.WriteU((uint)compressedHeader.Length, 16);
+            byte[] compressedHeader =
+                ComposeCompressedHeader(ref current);
+
+            uncompWriter.WriteU(
+                (uint)compressedHeader.Length,
+                16);
+
             uncompWriter.Flush();
-            byte[] uncompressedHeader = uncompWriter.ToArray();
 
-            byte[] frame = new byte[uncompressedHeader.Length + compressedHeader.Length + current.Bitstream.Length];
+            byte[] uncompressedHeader =
+                uncompWriter.ToArray();
+
+            byte[] frame =
+                new byte[
+                    uncompressedHeader.Length +
+                    compressedHeader.Length +
+                    current.Bitstream.Length];
+
             uncompressedHeader.CopyTo(frame, 0);
-            compressedHeader.CopyTo(frame, uncompressedHeader.Length);
-            current.Bitstream.CopyTo(frame, uncompressedHeader.Length + compressedHeader.Length);
+
+            compressedHeader.CopyTo(
+                frame,
+                uncompressedHeader.Length);
+
+            current.Bitstream.CopyTo(
+                frame,
+                uncompressedHeader.Length +
+                compressedHeader.Length);
 
             return frame;
         }
 
-        // VP9::GetCurrentFrame: o quadro atual so e decodificado quando o proximo chega,
-        // porque e o proximo que informa (LastShowFrame) se o atual era exibido ou oculto.
-        private Vp9FrameContainer GetCurrentFrame(in Vp9FrameContainer incoming)
+        private Vp9FrameContainer GetCurrentFrame(
+            in Vp9FrameContainer incoming)
         {
             Vp9FrameContainer current;
 
             if (_hasNext)
             {
                 current = _next;
-                current.ShowFrame = incoming.Picture.Flags.HasFlag(FrameFlags.LastShowFrame);
+
+                current.ShowFrame =
+                    incoming.Picture.Flags.HasFlag(
+                        FrameFlags.LastShowFrame);
+
                 _next = incoming;
             }
             else
@@ -113,33 +130,43 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
             return current;
         }
 
-        private VpxBitStreamWriter ComposeUncompressedHeader(ref Vp9FrameContainer current)
+        private VpxBitStreamWriter ComposeUncompressedHeader(
+            ref Vp9FrameContainer current)
         {
             ref PictureInfo pic = ref current.Picture;
 
             bool isKeyFrame = current.IsKeyFrame;
-            bool errorResilient = pic.Flags.HasFlag(FrameFlags.ErrorResilientMode);
-            bool intraOnly = pic.Flags.HasFlag(FrameFlags.IntraOnly);
+            bool errorResilient =
+                pic.Flags.HasFlag(
+                    FrameFlags.ErrorResilientMode);
+
+            bool intraOnly =
+                pic.Flags.HasFlag(
+                    FrameFlags.IntraOnly);
+
             bool showFrame = current.ShowFrame;
 
             VpxBitStreamWriter w = new();
 
-            w.WriteU(2, 2);            // Frame marker.
-            w.WriteU(0, 2);            // Profile 0.
-            w.WriteBit(false);         // Show existing frame.
-            w.WriteBit(!isKeyFrame);   // Frame type.
-            w.WriteBit(showFrame);     // Show frame.
+            w.WriteU(2, 2);
+            w.WriteU(0, 2);
+            w.WriteBit(false);
+            w.WriteBit(!isKeyFrame);
+            w.WriteBit(showFrame);
             w.WriteBit(errorResilient);
 
             if (isKeyFrame)
             {
                 w.WriteU(FrameSyncCode, 24);
-                w.WriteU(0, 3); // Color space.
-                w.WriteU(0, 1); // Color range.
-                WriteFrameSize(w, pic.CurrentFrameSize);
-                w.WriteBit(false); // Render and frame size different.
+                w.WriteU(0, 3);
+                w.WriteU(0, 1);
 
-                // Reset context.
+                WriteFrameSize(
+                    w,
+                    pic.CurrentFrameSize);
+
+                w.WriteBit(false);
+
                 _swapRefIndices = false;
                 ResetFrameContexts();
 
@@ -158,187 +185,289 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
 
                 if (!errorResilient)
                 {
-                    w.WriteU(0, 2); // Reset frame context.
+                    w.WriteU(0, 2);
                 }
 
-                ref Array4<uint> currOffsets = ref current.Offsets;
-                ref Array4<uint> nextOffsets = ref _next.Offsets;
+                ref Array4<uint> currOffsets =
+                    ref current.Offsets;
 
-                bool refFramesDifferent = currOffsets[1] != currOffsets[2];
-                bool nextReferencesSwap = nextOffsets[1] == currOffsets[2] || nextOffsets[2] == currOffsets[1];
-                bool needsRefSwap = refFramesDifferent && nextReferencesSwap;
+                ref Array4<uint> nextOffsets =
+                    ref _next.Offsets;
+
+                bool refFramesDifferent =
+                    currOffsets[1] != currOffsets[2];
+
+                bool nextReferencesSwap =
+                    nextOffsets[1] == currOffsets[2] ||
+                    nextOffsets[2] == currOffsets[1];
+
+                bool needsRefSwap =
+                    refFramesDifferent &&
+                    nextReferencesSwap;
 
                 if (needsRefSwap)
                 {
-                    _swapRefIndices = !_swapRefIndices;
+                    _swapRefIndices =
+                        !_swapRefIndices;
                 }
 
                 uint refreshFrameFlags = 0;
 
                 for (int index = 0; index < 3; index++)
                 {
-                    // Atualiza os slots que o proximo quadro vai usar apontando para o quadro atual.
-                    if (currOffsets[3] == nextOffsets[index])
+                    if (currOffsets[3] ==
+                        nextOffsets[index])
                     {
-                        refreshFrameFlags |= 1u << index;
+                        refreshFrameFlags |=
+                            1u << index;
                     }
                 }
 
                 if (_swapRefIndices)
                 {
-                    uint golden = (refreshFrameFlags >> 1) & 1;
-                    uint alt = (refreshFrameFlags >> 2) & 1;
-                    refreshFrameFlags = (refreshFrameFlags & ~6u) | (alt << 1) | (golden << 2);
+                    uint golden =
+                        (refreshFrameFlags >> 1) & 1;
+
+                    uint alt =
+                        (refreshFrameFlags >> 2) & 1;
+
+                    refreshFrameFlags =
+                        (refreshFrameFlags & ~6u) |
+                        (alt << 1) |
+                        (golden << 2);
                 }
 
                 if (intraOnly)
                 {
                     w.WriteU(FrameSyncCode, 24);
                     w.WriteU(refreshFrameFlags, 8);
-                    WriteFrameSize(w, pic.CurrentFrameSize);
-                    w.WriteBit(false); // Render and frame size different.
+
+                    WriteFrameSize(
+                        w,
+                        pic.CurrentFrameSize);
+
+                    w.WriteBit(false);
                 }
                 else
                 {
-                    bool swapIndices = needsRefSwap ^ _swapRefIndices;
-                    // Indices dos slots de LAST, GOLDEN e ALTREF (golden/alt trocados quando necessario).
-                    uint goldenSlot = swapIndices ? 2u : 1u;
-                    uint altSlot = swapIndices ? 1u : 2u;
+                    bool swapIndices =
+                        needsRefSwap ^
+                        _swapRefIndices;
+
+                    uint goldenSlot =
+                        swapIndices ? 2u : 1u;
+
+                    uint altSlot =
+                        swapIndices ? 1u : 2u;
 
                     w.WriteU(refreshFrameFlags, 8);
 
-                    for (int index = 1; index < 4; index++)
+                    for (int index = 1;
+                         index < 4;
+                         index++)
                     {
-                        uint slot = index == 1 ? 0u : (index == 2 ? goldenSlot : altSlot);
+                        uint slot =
+                            index == 1
+                                ? 0u
+                                : (index == 2
+                                    ? goldenSlot
+                                    : altSlot);
+
                         w.WriteU(slot, 3);
-                        w.WriteU((uint)(pic.RefFrameSignBias[index] & 1), 1);
+
+                        w.WriteU(
+                            (uint)(
+                                pic.RefFrameSignBias[index] &
+                                1),
+                            1);
                     }
 
-                    // Tamanho explicito: found_ref = 0 para as tres referencias.
                     w.WriteBit(false);
                     w.WriteBit(false);
                     w.WriteBit(false);
-                    WriteFrameSize(w, pic.CurrentFrameSize);
-                    w.WriteBit(false); // Render and frame size different.
 
-                    w.WriteBit(pic.AllowHighPrecisionMv != 0);
-                    w.WriteBit(pic.InterpFilter == 4);
+                    WriteFrameSize(
+                        w,
+                        pic.CurrentFrameSize);
+
+                    w.WriteBit(false);
+
+                    w.WriteBit(
+                        pic.AllowHighPrecisionMv != 0);
+
+                    w.WriteBit(
+                        pic.InterpFilter == 4);
 
                     if (pic.InterpFilter != 4)
                     {
-                        w.WriteU(pic.InterpFilter, 2);
+                        w.WriteU(
+                            pic.InterpFilter,
+                            2);
                     }
                 }
             }
 
             if (!errorResilient)
             {
-                w.WriteBit(true); // Refresh frame context.
-                w.WriteBit(true); // Frame parallel decoding mode.
+                w.WriteBit(true);
+                w.WriteBit(true);
             }
 
-            int frameCtxIdx = showFrame ? 0 : 1;
+            int frameCtxIdx =
+                showFrame ? 0 : 1;
 
-            w.WriteU((uint)frameCtxIdx, 2); // Frame context index.
+            w.WriteU(
+                (uint)frameCtxIdx,
+                2);
 
             if (errorResilient)
             {
-                // O FFmpeg volta todos os contextos para o padrao e nao guarda este quadro.
                 ResetFrameContexts();
                 _prevFrameProbs = _defaultProbs;
             }
             else
             {
-                _prevFrameProbs = _frameCtxs[frameCtxIdx]; // Referencia para o cabecalho comprimido.
-                _frameCtxs[frameCtxIdx] = current.Entropy;
+                _prevFrameProbs =
+                    _frameCtxs[frameCtxIdx];
+
+                _frameCtxs[frameCtxIdx] =
+                    current.Entropy;
             }
 
-            // Loop filter.
             w.WriteU(pic.FirstLevel, 6);
             w.WriteU(pic.SharpnessLevel, 3);
 
-            bool modeRefDeltaEnabled = pic.Lf.ModeRefDeltaEnabled != 0;
+            bool modeRefDeltaEnabled =
+                pic.Lf.ModeRefDeltaEnabled != 0;
+
             w.WriteBit(modeRefDeltaEnabled);
 
             if (modeRefDeltaEnabled)
             {
-                w.WriteBit(true); // Atualiza todos os deltas.
+                w.WriteBit(true);
 
-                for (int index = 0; index < 4; index++)
+                for (int index = 0;
+                     index < 4;
+                     index++)
                 {
                     w.WriteBit(true);
-                    w.WriteS(pic.Lf.RefDeltas[index], 6);
+
+                    w.WriteS(
+                        pic.Lf.RefDeltas[index],
+                        6);
                 }
 
-                for (int index = 0; index < 2; index++)
+                for (int index = 0;
+                     index < 2;
+                     index++)
                 {
                     w.WriteBit(true);
-                    w.WriteS(pic.Lf.ModeDeltas[index], 6);
+
+                    w.WriteS(
+                        pic.Lf.ModeDeltas[index],
+                        6);
                 }
             }
 
-            // Quantizacao.
             w.WriteU(pic.BaseQIndex, 8);
-            w.WriteDeltaQ((sbyte)pic.YDcDeltaQ);
-            w.WriteDeltaQ((sbyte)pic.UvDcDeltaQ);
-            w.WriteDeltaQ((sbyte)pic.UvAcDeltaQ);
 
-            WriteSegmentation(w, ref current);
+            w.WriteDeltaQ(
+                (sbyte)pic.YDcDeltaQ);
 
-            // Tiles.
-            int width = pic.CurrentFrameSize.Width;
-            int minTileColsLog2 = CalcMinLog2TileCols(width);
-            int maxTileColsLog2 = CalcMaxLog2TileCols(width);
+            w.WriteDeltaQ(
+                (sbyte)pic.UvDcDeltaQ);
 
-            int tileColsLog2Diff = pic.Log2TileCols - minTileColsLog2;
-            uint tileColsLog2IncMask = (1u << tileColsLog2Diff) - 1;
+            w.WriteDeltaQ(
+                (sbyte)pic.UvAcDeltaQ);
 
-            if (pic.Log2TileCols < maxTileColsLog2)
+            WriteSegmentation(
+                w,
+                ref current);
+
+            int width =
+                pic.CurrentFrameSize.Width;
+
+            int minTileColsLog2 =
+                CalcMinLog2TileCols(width);
+
+            int maxTileColsLog2 =
+                CalcMaxLog2TileCols(width);
+
+            int tileColsLog2Diff =
+                pic.Log2TileCols -
+                minTileColsLog2;
+
+            uint tileColsLog2IncMask =
+                (1u << tileColsLog2Diff) - 1;
+
+            if (pic.Log2TileCols <
+                maxTileColsLog2)
             {
-                w.WriteU(tileColsLog2IncMask << 1, tileColsLog2Diff + 1);
+                w.WriteU(
+                    tileColsLog2IncMask << 1,
+                    tileColsLog2Diff + 1);
             }
             else
             {
-                w.WriteU(tileColsLog2IncMask, tileColsLog2Diff);
+                w.WriteU(
+                    tileColsLog2IncMask,
+                    tileColsLog2Diff);
             }
 
-            bool tileRowsLog2IsNonZero = pic.Log2TileRows != 0;
-            w.WriteBit(tileRowsLog2IsNonZero);
+            bool tileRowsLog2IsNonZero =
+                pic.Log2TileRows != 0;
+
+            w.WriteBit(
+                tileRowsLog2IsNonZero);
 
             if (tileRowsLog2IsNonZero)
             {
-                w.WriteBit(pic.Log2TileRows > 1);
+                w.WriteBit(
+                    pic.Log2TileRows > 1);
             }
 
-            // O cabecalho comprimido usa intra_only do quadro-chave como verdadeiro.
             _currentIntraOnly = intraOnly;
 
             return w;
         }
 
-        private bool _currentIntraOnly;
-
         private void ResetFrameContexts()
         {
-            _prevFrameProbs = _defaultProbs;
+            _prevFrameProbs =
+                _defaultProbs;
 
-            for (int i = 0; i < _frameCtxs.Length; i++)
+            for (int i = 0;
+                 i < _frameCtxs.Length;
+                 i++)
             {
-                _frameCtxs[i] = _defaultProbs;
+                _frameCtxs[i] =
+                    _defaultProbs;
             }
         }
 
-        private static void WriteFrameSize(VpxBitStreamWriter w, FrameSize size)
+        private static void WriteFrameSize(
+            VpxBitStreamWriter w,
+            FrameSize size)
         {
-            w.WriteU((uint)(size.Width - 1), 16);
-            w.WriteU((uint)(size.Height - 1), 16);
+            w.WriteU(
+                (uint)(size.Width - 1),
+                16);
+
+            w.WriteU(
+                (uint)(size.Height - 1),
+                16);
         }
 
-        private static void WriteSegmentation(VpxBitStreamWriter w, ref Vp9FrameContainer current)
+        private static void WriteSegmentation(
+            VpxBitStreamWriter w,
+            ref Vp9FrameContainer current)
         {
-            ref Segmentation seg = ref current.Picture.Seg;
+            ref Segmentation seg =
+                ref current.Picture.Seg;
 
-            bool enabled = seg.Enabled != 0;
+            bool enabled =
+                seg.Enabled != 0;
+
             w.WriteBit(enabled);
 
             if (!enabled)
@@ -346,111 +475,150 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                 return;
             }
 
-            bool updateMap = seg.UpdateMap != 0;
+            bool updateMap =
+                seg.UpdateMap != 0;
+
             w.WriteBit(updateMap);
 
             if (updateMap)
             {
                 for (int i = 0; i < 7; i++)
                 {
-                    WriteOptionalProbability(w, current.Entropy.SegTreeProb[i]);
+                    WriteOptionalProbability(
+                        w,
+                        current.Entropy.SegTreeProb[i]);
                 }
 
-                bool temporalUpdate = seg.TemporalUpdate != 0;
+                bool temporalUpdate =
+                    seg.TemporalUpdate != 0;
+
                 w.WriteBit(temporalUpdate);
 
                 if (temporalUpdate)
                 {
                     for (int i = 0; i < 3; i++)
                     {
-                        WriteOptionalProbability(w, current.Entropy.SegPredProb[i]);
+                        WriteOptionalProbability(
+                            w,
+                            current.Entropy.SegPredProb[i]);
                     }
                 }
             }
 
-            // Sempre envia os dados completos (update_data = 1).
             w.WriteBit(true);
             w.WriteBit(seg.AbsDelta != 0);
 
-            ReadOnlySpan<int> featureBits = [8, 6, 2, 0];
+            ReadOnlySpan<int> featureBits =
+                [8, 6, 2, 0];
 
             for (int i = 0; i < 8; i++)
             {
-                uint mask = seg.FeatureMask[i];
+                uint mask =
+                    seg.FeatureMask[i];
 
                 for (int j = 0; j < 4; j++)
                 {
-                    // Como no Eden: um byte por recurso (u8 feature_enabled[8][4]).
-                    bool featureEnabled = ((mask >> (j * 8)) & 0xff) != 0;
+                    bool featureEnabled =
+                        ((mask >> (j * 8)) &
+                         0xff) != 0;
+
                     w.WriteBit(featureEnabled);
 
-                    if (!featureEnabled || featureBits[j] == 0)
+                    if (!featureEnabled ||
+                        featureBits[j] == 0)
                     {
                         continue;
                     }
 
-                    int data = seg.FeatureData[i][j];
+                    int data =
+                        seg.FeatureData[i][j];
 
                     if (j == 2)
                     {
-                        w.WriteU((uint)data, featureBits[j]);
+                        w.WriteU(
+                            (uint)data,
+                            featureBits[j]);
                     }
                     else
                     {
-                        w.WriteS(data, featureBits[j]);
+                        w.WriteS(
+                            data,
+                            featureBits[j]);
                     }
                 }
             }
         }
 
-        private static void WriteOptionalProbability(VpxBitStreamWriter w, byte probability)
+        private static void WriteOptionalProbability(
+            VpxBitStreamWriter w,
+            byte probability)
         {
-            bool coded = probability != 255;
+            bool coded =
+                probability != 255;
+
             w.WriteBit(coded);
 
             if (coded)
             {
-                w.WriteU(probability, 8);
+                w.WriteU(
+                    probability,
+                    8);
             }
         }
 
-        private byte[] ComposeCompressedHeader(ref Vp9FrameContainer current)
+        private byte[] ComposeCompressedHeader(
+            ref Vp9FrameContainer current)
         {
-            ref PictureInfo pic = ref current.Picture;
-            ref Vp9EntropyProbs probs = ref current.Entropy;
-            ref Vp9EntropyProbs prev = ref _prevFrameProbs;
+            ref PictureInfo pic =
+                ref current.Picture;
+
+            ref Vp9EntropyProbs probs =
+                ref current.Entropy;
+
+            ref Vp9EntropyProbs prev =
+                ref _prevFrameProbs;
 
             VpxRangeEncoder writer = new();
 
-            // Sem perdas (lossless) o tx_mode nao e escrito e vale ONLY_4X4.
-            int transformMode = pic.Lossless != 0 ? 0 : pic.TxMode;
+            int transformMode =
+                pic.Lossless != 0
+                    ? 0
+                    : pic.TxMode;
 
             if (pic.Lossless == 0)
             {
                 if (transformMode >= 3)
                 {
                     writer.Write(3, 2);
-                    writer.Write(transformMode == 4);
+                    writer.Write(
+                        transformMode == 4);
                 }
                 else
                 {
-                    writer.Write(transformMode, 2);
+                    writer.Write(
+                        transformMode,
+                        2);
                 }
             }
 
             if (transformMode == 4)
             {
-                // tx_mode_probs()
                 for (int i = 0; i < 2; i++)
                 {
-                    WriteProbabilityUpdate(writer, probs.Tx8x8Prob[i][0], prev.Tx8x8Prob[i][0]);
+                    WriteProbabilityUpdate(
+                        writer,
+                        probs.Tx8x8Prob[i][0],
+                        prev.Tx8x8Prob[i][0]);
                 }
 
                 for (int i = 0; i < 2; i++)
                 {
                     for (int j = 0; j < 2; j++)
                     {
-                        WriteProbabilityUpdate(writer, probs.Tx16x16Prob[i][j], prev.Tx16x16Prob[i][j]);
+                        WriteProbabilityUpdate(
+                            writer,
+                            probs.Tx16x16Prob[i][j],
+                            prev.Tx16x16Prob[i][j]);
                     }
                 }
 
@@ -458,57 +626,74 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                 {
                     for (int j = 0; j < 3; j++)
                     {
-                        WriteProbabilityUpdate(writer, probs.Tx32x32Prob[i][j], prev.Tx32x32Prob[i][j]);
+                        WriteProbabilityUpdate(
+                            writer,
+                            probs.Tx32x32Prob[i][j],
+                            prev.Tx32x32Prob[i][j]);
                     }
                 }
             }
 
-            // read_coef_probs()
-            WriteCoefProbabilityUpdate(writer, transformMode, ref probs, ref prev);
+            WriteCoefProbabilityUpdate(
+                writer,
+                transformMode,
+                ref probs,
+                ref prev);
 
-            // read_skip_prob()
             for (int i = 0; i < 3; i++)
             {
-                WriteProbabilityUpdate(writer, probs.SkipProb[i], prev.SkipProb[i]);
+                WriteProbabilityUpdate(
+                    writer,
+                    probs.SkipProb[i],
+                    prev.SkipProb[i]);
             }
 
             if (!_currentIntraOnly)
             {
-                // read_inter_mode_probs()
                 for (int i = 0; i < 7; i++)
                 {
                     for (int j = 0; j < 3; j++)
                     {
-                        WriteProbabilityUpdate(writer, probs.InterModeProb[i][j], prev.InterModeProb[i][j]);
+                        WriteProbabilityUpdate(
+                            writer,
+                            probs.InterModeProb[i][j],
+                            prev.InterModeProb[i][j]);
                     }
                 }
 
                 if (pic.InterpFilter == 4)
                 {
-                    // read_interp_filter_probs()
                     for (int i = 0; i < 4; i++)
                     {
                         for (int j = 0; j < 2; j++)
                         {
-                            WriteProbabilityUpdate(writer, probs.SwitchableInterpProb[i][j], prev.SwitchableInterpProb[i][j]);
+                            WriteProbabilityUpdate(
+                                writer,
+                                probs.SwitchableInterpProb[i][j],
+                                prev.SwitchableInterpProb[i][j]);
                         }
                     }
                 }
 
-                // read_is_inter_probs()
                 for (int i = 0; i < 4; i++)
                 {
-                    WriteProbabilityUpdate(writer, probs.IntraInterProb[i], prev.IntraInterProb[i]);
+                    WriteProbabilityUpdate(
+                        writer,
+                        probs.IntraInterProb[i],
+                        prev.IntraInterProb[i]);
                 }
 
-                // frame_reference_mode()
-                if ((pic.RefFrameSignBias[1] & 1) != (pic.RefFrameSignBias[2] & 1) ||
-                    (pic.RefFrameSignBias[1] & 1) != (pic.RefFrameSignBias[3] & 1))
+                if ((pic.RefFrameSignBias[1] & 1) !=
+                        (pic.RefFrameSignBias[2] & 1) ||
+                    (pic.RefFrameSignBias[1] & 1) !=
+                        (pic.RefFrameSignBias[3] & 1))
                 {
                     if (pic.ReferenceMode >= 1)
                     {
                         writer.Write(1, 1);
-                        writer.Write(pic.ReferenceMode == 2);
+
+                        writer.Write(
+                            pic.ReferenceMode == 2);
                     }
                     else
                     {
@@ -516,12 +701,14 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                     }
                 }
 
-                // frame_reference_mode_probs()
                 if (pic.ReferenceMode == 2)
                 {
                     for (int i = 0; i < 5; i++)
                     {
-                        WriteProbabilityUpdate(writer, probs.CompInterProb[i], prev.CompInterProb[i]);
+                        WriteProbabilityUpdate(
+                            writer,
+                            probs.CompInterProb[i],
+                            prev.CompInterProb[i]);
                     }
                 }
 
@@ -531,7 +718,10 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                     {
                         for (int j = 0; j < 2; j++)
                         {
-                            WriteProbabilityUpdate(writer, probs.SingleRefProb[i][j], prev.SingleRefProb[i][j]);
+                            WriteProbabilityUpdate(
+                                writer,
+                                probs.SingleRefProb[i][j],
+                                prev.SingleRefProb[i][j]);
                         }
                     }
                 }
@@ -540,48 +730,69 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                 {
                     for (int i = 0; i < 5; i++)
                     {
-                        WriteProbabilityUpdate(writer, probs.CompRefProb[i], prev.CompRefProb[i]);
+                        WriteProbabilityUpdate(
+                            writer,
+                            probs.CompRefProb[i],
+                            prev.CompRefProb[i]);
                     }
                 }
 
-                // read_y_mode_probs()
                 for (int i = 0; i < 4; i++)
                 {
                     for (int j = 0; j < 9; j++)
                     {
-                        WriteProbabilityUpdate(writer, probs.YModeProb[i][j], prev.YModeProb[i][j]);
+                        WriteProbabilityUpdate(
+                            writer,
+                            probs.YModeProb[i][j],
+                            prev.YModeProb[i][j]);
                     }
                 }
 
-                // read_partition_probs()
                 for (int i = 0; i < 16; i++)
                 {
                     for (int j = 0; j < 3; j++)
                     {
-                        WriteProbabilityUpdate(writer, probs.PartitionProb[i][j], prev.PartitionProb[i][j]);
+                        WriteProbabilityUpdate(
+                            writer,
+                            probs.PartitionProb[i][j],
+                            prev.PartitionProb[i][j]);
                     }
                 }
 
-                // mv_probs()
                 for (int i = 0; i < 3; i++)
                 {
-                    WriteMvProbabilityUpdate(writer, probs.Joints[i], prev.Joints[i]);
+                    WriteMvProbabilityUpdate(
+                        writer,
+                        probs.Joints[i],
+                        prev.Joints[i]);
                 }
 
                 for (int i = 0; i < 2; i++)
                 {
-                    WriteMvProbabilityUpdate(writer, probs.Sign[i], prev.Sign[i]);
+                    WriteMvProbabilityUpdate(
+                        writer,
+                        probs.Sign[i],
+                        prev.Sign[i]);
 
                     for (int j = 0; j < 10; j++)
                     {
-                        WriteMvProbabilityUpdate(writer, probs.Classes[i][j], prev.Classes[i][j]);
+                        WriteMvProbabilityUpdate(
+                            writer,
+                            probs.Classes[i][j],
+                            prev.Classes[i][j]);
                     }
 
-                    WriteMvProbabilityUpdate(writer, probs.Class0[i][0], prev.Class0[i][0]);
+                    WriteMvProbabilityUpdate(
+                        writer,
+                        probs.Class0[i][0],
+                        prev.Class0[i][0]);
 
                     for (int j = 0; j < 10; j++)
                     {
-                        WriteMvProbabilityUpdate(writer, probs.Bits[i][j], prev.Bits[i][j]);
+                        WriteMvProbabilityUpdate(
+                            writer,
+                            probs.Bits[i][j],
+                            prev.Bits[i][j]);
                     }
                 }
 
@@ -591,22 +802,37 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                     {
                         for (int k = 0; k < 3; k++)
                         {
-                            WriteMvProbabilityUpdate(writer, probs.Class0Fp[i][j][k], prev.Class0Fp[i][j][k]);
+                            WriteMvProbabilityUpdate(
+                                writer,
+                                probs.Class0Fp[i][j][k],
+                                prev.Class0Fp[i][j][k]);
                         }
                     }
 
                     for (int j = 0; j < 3; j++)
                     {
-                        WriteMvProbabilityUpdate(writer, probs.Fp[i][j], prev.Fp[i][j]);
+                        WriteMvProbabilityUpdate(
+                            writer,
+                            probs.Fp[i][j],
+                            prev.Fp[i][j]);
                     }
                 }
 
                 if (pic.AllowHighPrecisionMv != 0)
                 {
-                    for (int index = 0; index < 2; index++)
+                    for (int index = 0;
+                         index < 2;
+                         index++)
                     {
-                        WriteMvProbabilityUpdate(writer, probs.Class0Hp[index], prev.Class0Hp[index]);
-                        WriteMvProbabilityUpdate(writer, probs.Hp[index], prev.Hp[index]);
+                        WriteMvProbabilityUpdate(
+                            writer,
+                            probs.Class0Hp[index],
+                            prev.Class0Hp[index]);
+
+                        WriteMvProbabilityUpdate(
+                            writer,
+                            probs.Hp[index],
+                            prev.Hp[index]);
                     }
                 }
             }
@@ -616,28 +842,48 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
             return writer.ToArray();
         }
 
-        private static void WriteCoefProbabilityUpdate(VpxRangeEncoder writer, int txMode, ref Vp9EntropyProbs probs, ref Vp9EntropyProbs prev)
+        private static void WriteCoefProbabilityUpdate(
+            VpxRangeEncoder writer,
+            int txMode,
+            ref Vp9EntropyProbs probs,
+            ref Vp9EntropyProbs prev)
         {
-            for (int blockIndex = 0; blockIndex < 4; blockIndex++)
+            for (int blockIndex = 0;
+                 blockIndex < 4;
+                 blockIndex++)
             {
                 bool update = false;
 
-                for (int i = 0; i < 2 && !update; i++)
+                for (int i = 0;
+                     i < 2 && !update;
+                     i++)
                 {
-                    for (int j = 0; j < 2 && !update; j++)
+                    for (int j = 0;
+                         j < 2 && !update;
+                         j++)
                     {
-                        for (int k = 0; k < 6 && !update; k++)
+                        for (int k = 0;
+                             k < 6 && !update;
+                             k++)
                         {
-                            for (int l = 0; l < 6 && !update; l++)
+                            for (int l = 0;
+                                 l < 6 && !update;
+                                 l++)
                             {
-                                if (k == 0 && l >= 3)
+                                if (k == 0 &&
+                                    l >= 3)
                                 {
                                     continue;
                                 }
 
-                                for (int m = 0; m < 3; m++)
+                                for (int m = 0;
+                                     m < 3;
+                                     m++)
                                 {
-                                    if (probs.CoefProbs[blockIndex][i][j][k][l][m] != prev.CoefProbs[blockIndex][i][j][k][l][m])
+                                    if (probs.CoefProbs[
+                                            blockIndex][i][j][k][l][m] !=
+                                        prev.CoefProbs[
+                                            blockIndex][i][j][k][l][m])
                                     {
                                         update = true;
                                         break;
@@ -662,11 +908,16 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                                 {
                                     if (k != 0 || l < 3)
                                     {
-                                        for (int m = 0; m < 3; m++)
+                                        for (int m = 0;
+                                             m < 3;
+                                             m++)
                                         {
-                                            WriteProbabilityUpdate(writer,
-                                                probs.CoefProbs[blockIndex][i][j][k][l][m],
-                                                prev.CoefProbs[blockIndex][i][j][k][l][m]);
+                                            WriteProbabilityUpdate(
+                                                writer,
+                                                probs.CoefProbs[
+                                                    blockIndex][i][j][k][l][m],
+                                                prev.CoefProbs[
+                                                    blockIndex][i][j][k][l][m]);
                                         }
                                     }
                                 }
@@ -682,37 +933,64 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
             }
         }
 
-        private static void WriteProbabilityUpdate(VpxRangeEncoder writer, byte newProb, byte oldProb)
+        private static void WriteProbabilityUpdate(
+            VpxRangeEncoder writer,
+            byte newProb,
+            byte oldProb)
         {
-            bool update = newProb != oldProb;
+            bool update =
+                newProb != oldProb;
 
-            writer.Write(update, DiffUpdateProbability);
+            writer.Write(
+                update,
+                DiffUpdateProbability);
 
             if (update)
             {
-                WriteProbabilityDelta(writer, newProb, oldProb);
+                WriteProbabilityDelta(
+                    writer,
+                    newProb,
+                    oldProb);
             }
         }
 
-        private static void WriteProbabilityDelta(VpxRangeEncoder writer, byte newProb, byte oldProb)
+        private static void WriteProbabilityDelta(
+            VpxRangeEncoder writer,
+            byte newProb,
+            byte oldProb)
         {
-            int delta = RemapProbability(newProb, oldProb);
+            int delta =
+                RemapProbability(
+                    newProb,
+                    oldProb);
 
-            EncodeTermSubExp(writer, delta);
+            EncodeTermSubExp(
+                writer,
+                delta);
         }
 
-        // Inverso de 6.3.4 (decode_term_subexp).
-        private static void EncodeTermSubExp(VpxRangeEncoder writer, int value)
+        private static void EncodeTermSubExp(
+            VpxRangeEncoder writer,
+            int value)
         {
-            if (WriteLessThan(writer, value, 16))
+            if (WriteLessThan(
+                writer,
+                value,
+                16))
             {
                 writer.Write(value, 4);
             }
-            else if (WriteLessThan(writer, value, 32))
+            else if (WriteLessThan(
+                writer,
+                value,
+                32))
             {
                 writer.Write(value - 16, 4);
             }
-            else if (WriteLessThan(writer, value, 64))
+            else if (WriteLessThan(
+                writer,
+                value,
+                64))
             {
                 writer.Write(value - 32, 5);
             }
@@ -721,45 +999,67 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                 value -= 64;
 
                 const int Size = 8;
+                const int Mask =
+                    (1 << Size) - 191;
 
-                const int Mask = (1 << Size) - 191;
-
-                int delta = value - Mask;
+                int delta =
+                    value - Mask;
 
                 if (delta < 0)
                 {
-                    writer.Write(value, Size - 1);
+                    writer.Write(
+                        value,
+                        Size - 1);
                 }
                 else
                 {
-                    writer.Write((delta / 2) + Mask, Size - 1);
-                    writer.Write(delta & 1, 1);
+                    writer.Write(
+                        (delta / 2) + Mask,
+                        Size - 1);
+
+                    writer.Write(
+                        delta & 1,
+                        1);
                 }
             }
         }
 
-        private static bool WriteLessThan(VpxRangeEncoder writer, int value, int test)
+        private static bool WriteLessThan(
+            VpxRangeEncoder writer,
+            int value,
+            int test)
         {
-            bool isLessThan = value < test;
+            bool isLessThan =
+                value < test;
+
             writer.Write(!isLessThan);
 
             return isLessThan;
         }
 
-        // 6.3.17: atualizacao das probabilidades de vetores de movimento.
-        private static void WriteMvProbabilityUpdate(VpxRangeEncoder writer, byte newProb, byte oldProb)
+        private static void WriteMvProbabilityUpdate(
+            VpxRangeEncoder writer,
+            byte newProb,
+            byte oldProb)
         {
-            bool update = newProb != oldProb;
-            writer.Write(update, DiffUpdateProbability);
+            bool update =
+                newProb != oldProb;
+
+            writer.Write(
+                update,
+                DiffUpdateProbability);
 
             if (update)
             {
-                writer.Write(newProb >> 1, 7);
+                writer.Write(
+                    newProb >> 1,
+                    7);
             }
         }
 
-        // 6.3.6: recentraliza a probabilidade.
-        private static int RecenterNonNeg(int newProb, int oldProb)
+        private static int RecenterNonNeg(
+            int newProb,
+            int oldProb)
         {
             if (newProb > oldProb * 2)
             {
@@ -768,29 +1068,45 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
 
             if (newProb >= oldProb)
             {
-                return (newProb - oldProb) * 2;
+                return
+                    (newProb - oldProb) * 2;
             }
 
-            return ((oldProb - newProb) * 2) - 1;
+            return
+                ((oldProb - newProb) * 2) - 1;
         }
 
-        // 6.3.5: ajusta oldProb conforme newProb.
-        private static int RemapProbability(int newProb, int oldProb)
+        private static int RemapProbability(
+            int newProb,
+            int oldProb)
         {
             newProb--;
             oldProb--;
 
-            byte i = oldProb * 2 <= 0xff
-                ? (byte)Math.Max(0, RecenterNonNeg(newProb, oldProb) - 1)
-                : (byte)Math.Max(0, RecenterNonNeg(0xff - 1 - newProb, 0xff - 1 - oldProb) - 1);
+            byte i =
+                oldProb * 2 <= 0xff
+                    ? (byte)Math.Max(
+                        0,
+                        RecenterNonNeg(
+                            newProb,
+                            oldProb) - 1)
+                    : (byte)Math.Max(
+                        0,
+                        RecenterNonNeg(
+                            0xff - 1 - newProb,
+                            0xff - 1 - oldProb) - 1);
 
-            return (i + 7) % 13 == 0 ? ((i + 7) / 13) - 1 : i + 20 - ((i + 7) / 13);
+            return (i + 7) % 13 == 0
+                ? ((i + 7) / 13) - 1
+                : i + 20 - ((i + 7) / 13);
         }
 
-        // 6.2.14: calculo do numero de colunas de tiles.
-        private static int CalcMinLog2TileCols(int frameWidth)
+        private static int CalcMinLog2TileCols(
+            int frameWidth)
         {
-            int sb64Cols = (frameWidth + 63) / 64;
+            int sb64Cols =
+                (frameWidth + 63) / 64;
+
             int minLog2 = 0;
 
             while ((64 << minLog2) < sb64Cols)
@@ -801,9 +1117,12 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
             return minLog2;
         }
 
-        private static int CalcMaxLog2TileCols(int frameWidth)
+        private static int CalcMaxLog2TileCols(
+            int frameWidth)
         {
-            int sb64Cols = (frameWidth + 63) / 64;
+            int sb64Cols =
+                (frameWidth + 63) / 64;
+
             int maxLog2 = 1;
 
             while ((sb64Cols >> maxLog2) >= 4)

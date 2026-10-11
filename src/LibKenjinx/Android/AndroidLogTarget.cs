@@ -20,12 +20,6 @@ namespace LibKenjinx
 
         public void Log(object sender, LogEventArgs args)
         {
-#if !DEBUG
-            if (args.Message != null && (args.Message.Contains("[MUA3") || args.Message.Contains("[NEOV2")))
-            {
-                return;
-            }
-#endif
             Logcat.AndroidLogPrint(GetLogLevel(args.Level), _name, _formatter.Format(args));
         }
 

@@ -3,6 +3,7 @@ using Ryujinx.Common;
 using Ryujinx.Memory;
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -48,6 +49,13 @@ namespace Ryujinx.Cpu.Signal
         public int UnixOldSigaction3Arg;
 
         /// <summary>
+        /// Pre-opened descriptor and libc write pointer used to capture an unhandled Linux
+        /// AArch64 fault without entering managed code from signal context.
+        /// </summary>
+        public int UnixDiagnosticFd;
+        public nint UnixDiagnosticWrite;
+
+        /// <summary>
         /// Fixed size array of tracked ranges.
         /// </summary>
         public SignalHandlerRangeArray Ranges;
@@ -59,11 +67,12 @@ namespace Ryujinx.Cpu.Signal
         private static nint _signalHandlerPtr;
 
         private static MemoryBlock _codeBlock;
+        private static FileStream _diagnosticStream;
+        private static nint _libcHandle;
 
         private static readonly Lock _lock = new();
         private static bool _initialized;
         private static bool _customUnixWrapperInstalled;
-        private static UnixSignalHandlerRegistration.SigAction _unixOriginalAction;
 
         static NativeSignalHandler()
         {
@@ -93,7 +102,50 @@ namespace Ryujinx.Cpu.Signal
 
                 if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || PlatformInfo.IsBionic)
                 {
-                    _signalHandlerPtr = MapCode(NativeSignalHandlerGenerator.GenerateUnixSignalHandler(_handlerConfig, rangeStructSize));
+                    if (OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
+                    {
+                        try
+                        {
+                            _diagnosticStream = new FileStream(
+                                "/tmp/ryujinx-unhandled-sigsegv.bin",
+                                FileMode.Create,
+                                FileAccess.Write,
+                                FileShare.ReadWrite,
+                                1,
+                                FileOptions.WriteThrough);
+                            _libcHandle = NativeLibrary.Load("libc.so.6");
+                            config.UnixDiagnosticFd = (int)_diagnosticStream.SafeFileHandle.DangerousGetHandle();
+                            config.UnixDiagnosticWrite = NativeLibrary.GetExport(_libcHandle, "write");
+                        }
+                        catch
+                        {
+                            _diagnosticStream?.Dispose();
+                            _diagnosticStream = null;
+                            config.UnixDiagnosticFd = 0;
+                            config.UnixDiagnosticWrite = nint.Zero;
+                        }
+                    }
+
+                    byte[] generatedSignalHandler = NativeSignalHandlerGenerator.GenerateUnixSignalHandler(_handlerConfig, rangeStructSize);
+                    _signalHandlerPtr = MapCode(generatedSignalHandler);
+
+                    try
+                    {
+                        File.WriteAllBytes("/tmp/ryujinx-native-signal-handler.bin", generatedSignalHandler);
+
+                        ulong mappedSize = BitUtils.AlignUp(
+                            (ulong)generatedSignalHandler.Length,
+                            MemoryBlock.GetPageSize());
+
+                        File.WriteAllText(
+                            "/tmp/ryujinx-native-signal-handler.txt",
+                            $"PTR=0x{(ulong)_signalHandlerPtr:X16}\n" +
+                            $"CODE_SIZE=0x{generatedSignalHandler.Length:X}\n" +
+                            $"MAP_SIZE=0x{mappedSize:X}\n");
+                    }
+                    catch
+                    {
+                    }
 
                     if (PlatformInfo.IsBionic)
                     {
@@ -108,7 +160,6 @@ namespace Ryujinx.Cpu.Signal
 
                     UnixSignalHandlerRegistration.SigAction old = UnixSignalHandlerRegistration.RegisterExceptionHandler(_signalHandlerPtr);
 
-                    _unixOriginalAction = old;
                     config.UnixOldSigaction = (nuint)(ulong)old.sa_handler;
                     config.UnixOldSigaction3Arg = old.sa_flags & 4;
                 }
@@ -151,10 +202,6 @@ namespace Ryujinx.Cpu.Signal
         /// This also works when another CPU backend initialized the shared handler first.
         /// </summary>
         public static void InstallUnixSignalWrapper(Func<nint, nint, nint> customSignalHandlerFactory)
-            => InstallUnixSignalWrapper(customSignalHandlerFactory, null);
-
-        internal static void InstallUnixSignalWrapper(Func<nint, nint, nint> customSignalHandlerFactory,
-            Func<UnixSignalHandlerRegistration.SigAction, nint> previousActionFactory)
         {
             ArgumentNullException.ThrowIfNull(customSignalHandlerFactory);
 
@@ -168,28 +215,9 @@ namespace Ryujinx.Cpu.Signal
                 }
 
                 ref SignalHandlerConfig config = ref GetConfigRef();
-                nuint previousPointer = config.UnixOldSigaction;
-                int previousKind = config.UnixOldSigaction3Arg;
-                bool androidChain = PlatformInfo.IsBionic && previousActionFactory != null;
-                nint previous = androidChain ? previousActionFactory(_unixOriginalAction) : (nint)previousPointer;
-                nint wrapper = customSignalHandlerFactory(previous, _signalHandlerPtr);
+                nint wrapper = customSignalHandlerFactory((nint)config.UnixOldSigaction, _signalHandlerPtr);
 
-                if (androidChain)
-                {
-                    config.UnixOldSigaction = (nuint)previous;
-                    config.UnixOldSigaction3Arg = 4; // Generated dispatcher always takes the full signal frame.
-                }
-                try
-                {
-                    UnixSignalHandlerRegistration.RegisterExceptionHandler(wrapper, blockNceSuspend: androidChain,
-                        inheritedFlags: androidChain ? _unixOriginalAction.sa_flags : 0);
-                }
-                catch
-                {
-                    config.UnixOldSigaction = previousPointer;
-                    config.UnixOldSigaction3Arg = previousKind;
-                    throw;
-                }
+                UnixSignalHandlerRegistration.RegisterExceptionHandler(wrapper);
                 _signalHandlerPtr = wrapper;
                 _customUnixWrapperInstalled = true;
             }

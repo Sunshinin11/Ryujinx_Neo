@@ -140,27 +140,6 @@ namespace Ryujinx.HLE.HOS.Services.Settings
             return ResultCode.Success;
         }
 
-        [CommandCmif(12)] // 18.0.0+
-        // GetKeyCodeMapByPort(u32 port) -> buffer<nn::kpr::KeyCodeMap, 0x16>
-        // NEOV2-SET12: used by newer SDK titles (e.g. GameMaker 2024 runtime). Same map as GetKeyCodeMap2.
-        public ResultCode GetKeyCodeMapByPort(ServiceCtx context)
-        {
-            uint port = context.RequestData.ReadUInt32();
-
-            Logger.Stub?.PrintStub(LogClass.ServiceSet, new { port });
-
-            return GetKeyCodeMapImpl(context, 2);
-        }
-
-        [CommandCmif(17)] // 23.0.0+
-        // GetKeyboardLayout() -> s32
-        public ResultCode GetKeyboardLayout(ServiceCtx context)
-        {
-            context.ResponseData.Write((int)context.Device.System.State.DesiredKeyboardLayout);
-
-            return ResultCode.Success;
-        }
-
         private ResultCode GetKeyCodeMapImpl(ServiceCtx context, int version)
         {
             if (context.Request.ReceiveBuff[0].Size != 0x1000)

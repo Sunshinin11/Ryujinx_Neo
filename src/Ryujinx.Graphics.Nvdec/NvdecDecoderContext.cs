@@ -8,8 +8,8 @@ namespace Ryujinx.Graphics.Nvdec
         private FFmpeg.Vp8.Decoder _vp8Decoder;
         private Vp9FFmpeg.Vp9FFmpegPath _vp9FFmpeg;
 
-        /// <summary>NEOV2-VP9EDEN1: estado do VP9 pelo FFmpeg deste contexto.</summary>
-        public Vp9FFmpeg.Vp9FFmpegPath Vp9FFmpegDecoder => _vp9FFmpeg ??= new Vp9FFmpeg.Vp9FFmpegPath();
+        public Vp9FFmpeg.Vp9FFmpegPath Vp9FFmpegDecoder =>
+            _vp9FFmpeg ??= new Vp9FFmpeg.Vp9FFmpegPath();
 
         public FFmpeg.H264.Decoder GetH264Decoder()
         {

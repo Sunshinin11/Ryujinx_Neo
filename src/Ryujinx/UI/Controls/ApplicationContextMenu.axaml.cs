@@ -32,6 +32,22 @@ namespace Ryujinx.Ava.UI.Controls
             AvaloniaXamlLoader.Load(this);
         }
 
+        public async void OpenGameSettings_Click(object sender, RoutedEventArgs args)
+        {
+            MainWindowViewModel viewModel =
+                (sender as MenuItem)?.DataContext as MainWindowViewModel;
+
+            if (viewModel?.SelectedApplication != null)
+            {
+                ApplicationData application = viewModel.SelectedApplication;
+
+                await new GameSettingsWindow(
+                    application.Id,
+                    application.Name)
+                    .ShowDialog((Window)viewModel.TopLevel);
+            }
+        }
+
         public void ToggleFavorite_Click(object sender, RoutedEventArgs args)
         {
             MainWindowViewModel viewModel = (sender as MenuItem)?.DataContext as MainWindowViewModel;
@@ -405,14 +421,21 @@ namespace Ryujinx.Ava.UI.Controls
             }
         }
 
-        public void CreateApplicationShortcut_Click(object sender, RoutedEventArgs args)
+        public async void CreateApplicationShortcut_Click(object sender, RoutedEventArgs args)
         {
             MainWindowViewModel viewModel = (sender as MenuItem)?.DataContext as MainWindowViewModel;
 
             if (viewModel?.SelectedApplication != null)
             {
                 ApplicationData selectedApplication = viewModel.SelectedApplication;
-                ShortcutHelper.CreateAppShortcut(selectedApplication.Path, selectedApplication.Name, selectedApplication.IdString, selectedApplication.Icon);
+                try
+                {
+                    await ShortcutHelper.CreateAppShortcut(selectedApplication.Path, selectedApplication.Name, selectedApplication.IdString, selectedApplication.Icon);
+                }
+                catch (Exception exception)
+                {
+                    await ContentDialogHelper.CreateErrorDialog($"Não foi possível adicionar o jogo à Steam.\n\n{exception.Message}");
+                }
             }
         }
 

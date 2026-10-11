@@ -101,14 +101,8 @@ namespace Ryujinx.Memory.Tracking
         }
 
         /// <summary>
-        /// NEOV2 NCE-PROT1: re-applies the tracking protection of guest regions in a range, after the guest memory
-        /// permission of that range was changed on the host pages (for example by IPC buffer or memory permission
-        /// changes). Without this, pages the GPU is tracking lose their protection, and CPU accesses to them are no
-        /// longer seen. Eden does the same by never changing the protection of pages the GPU caches.
+        /// Re-applies GPU tracking protection after guest permission changes.
         /// </summary>
-        /// <param name="va">Virtual memory address</param>
-        /// <param name="size">Size of the range</param>
-        /// <returns>True if at least one region had its protection applied again</returns>
         public bool RestoreGuestProtection(ulong va, ulong size)
         {
             bool restored = false;
@@ -116,14 +110,21 @@ namespace Ryujinx.Memory.Tracking
             lock (TrackingLock)
             {
                 _guestVirtualRegions.Lock.EnterReadLock();
-                ReadOnlySpan<VirtualRegion> overlaps = _guestVirtualRegions.FindOverlapsAsSpan(va, size);
 
-                for (int i = 0; i < overlaps.Length; i++)
+                try
                 {
-                    restored |= overlaps[i].RestoreProtectionAfterExternalChange();
-                }
+                    ReadOnlySpan<VirtualRegion> overlaps =
+                        _guestVirtualRegions.FindOverlapsAsSpan(va, size);
 
-                _guestVirtualRegions.Lock.ExitReadLock();
+                    for (int i = 0; i < overlaps.Length; i++)
+                    {
+                        restored |= overlaps[i].RestoreProtectionAfterExternalChange();
+                    }
+                }
+                finally
+                {
+                    _guestVirtualRegions.Lock.ExitReadLock();
+                }
             }
 
             return restored;
@@ -395,7 +396,17 @@ namespace Ryujinx.Memory.Tracking
         /// <param name="guest">True if the protection is for guest access, false otherwise</param>
         internal void ProtectVirtualRegion(VirtualRegion region, MemoryPermission permission, bool guest)
         {
-            _memoryManager.TrackingReprotect(region.Address, region.Size, permission, guest);
+            ProtectVirtualRange(region.Address, region.Size, permission, guest);
+        }
+
+        /// <summary>
+        /// Reprotects a contiguous range made from adjacent virtual regions.
+        /// The caller must hold the tracking lock and ensure every region in the
+        /// range requires the same permission and belongs to the same address view.
+        /// </summary>
+        internal void ProtectVirtualRange(ulong address, ulong size, MemoryPermission permission, bool guest)
+        {
+            _memoryManager.TrackingReprotect(address, size, permission, guest);
         }
 
         /// <summary>

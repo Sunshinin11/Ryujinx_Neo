@@ -10,6 +10,7 @@ using Buffer = Silk.NET.Vulkan.Buffer;
 using CompareOp = Ryujinx.Graphics.GAL.CompareOp;
 using Format = Ryujinx.Graphics.GAL.Format;
 using SamplerCreateInfo = Ryujinx.Graphics.GAL.SamplerCreateInfo;
+using Ryujinx.Common.Logging;
 
 namespace Ryujinx.Graphics.Vulkan
 {
@@ -47,12 +48,16 @@ namespace Ryujinx.Graphics.Vulkan
             public Auto<DisposableImageView> ImageView;
             public Auto<DisposableSampler> Sampler;
 
-            public TextureRef(ShaderStage stage, TextureView view, Auto<DisposableImageView> imageView, Auto<DisposableSampler> sampler)
+            // TOTK-C827-SAMPLERTRACE5
+            public SamplerHolder SamplerHolder;
+
+            public TextureRef(ShaderStage stage, TextureView view, Auto<DisposableImageView> imageView, SamplerHolder samplerHolder)
             {
                 Stage = stage;
                 View = view;
                 ImageView = imageView;
-                Sampler = sampler;
+                SamplerHolder = samplerHolder;
+                Sampler = samplerHolder?.GetSampler();
             }
         }
 
@@ -124,11 +129,446 @@ namespace Ryujinx.Graphics.Vulkan
 
         private DirtyFlags _dirty;
 
+        private ulong _uniformAssignments;
+        private ulong _uniformBindingChanges;
+        private ulong _uniformBufferChanges;
+        private ulong _uniformOffsetOnlyChanges;
+        private ulong _uniformRangeOnlyChanges;
+        private ulong _uniformOffsetRangeChanges;
+        private ulong _uniformOtherSameBufferChanges;
+        private bool _uniformPendingOffsetChange;
+        private bool _uniformPendingDescriptorChange;
+        private ulong _uniformFlushes;
+        private ulong _uniformOffsetOnlyFlushes;
+        private ulong _uniformDescriptorFlushes;
+        private ulong _uniformOtherFlushes;
+        private ulong _dynamicUniformFlushes;
+        private ulong _dynamicUniformDescriptorUpdates;
+        private ulong _dynamicUniformOffsetRebinds;
+        private ulong _dynamicUniformResolvedChanges;
+        private ulong _programSwitches;
+        private ulong _sameLayoutProgramSwitches;
+        private ulong _fullyReusedProgramSwitches;
+        private ulong _partiallyReusedProgramSwitches;
+
         private readonly BufferHolder _dummyBuffer;
         private readonly TextureView _dummyTexture;
         private readonly SamplerHolder _dummySampler;
 
+        // TOTK-C827-LINEAR-B128-6
+        private readonly SamplerHolder _totkC827LinearSampler;
+        private static readonly bool _totkC827LinearB128 =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_C827_LINEAR_B128") == "1";
+        private bool _totkC827LinearB128Logged;
+
+        // TOTK-C827-DEPTHCONST4
+        private readonly TextureView _totkDepthZeroTexture;
+        private readonly TextureView _totkDepthOneTexture;
+        private static readonly string _totkC827DepthConst =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_C827_DEPTH_CONST");
+        private bool _totkC827DepthConstLogged;
+
         public List<TextureView> FeedbackLoopHazards { get; private set; }
+
+        // TOTK-C827-SAMPLERTRACE5
+        private bool _totkC827SamplerLogged;
+
+        // TOTK-C827-DEPTH-PRODUCER12-DS
+        private static readonly bool _totkC827DepthProducerTrace =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_C827_DEPTH_PRODUCER_TRACE") == "1";
+
+        private readonly HashSet<int> _totkC827DepthProducerDumpedStorages = new();
+
+        // TOTK-C827-DEPTH-COPY19B
+        private static readonly bool _totkC827DepthCopy19b =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_C827_DEPTH_COPY") == "1";
+
+        private TextureView _totkC827DepthCopyView19b;
+        private bool _totkC827DepthCopyLogged19b;
+
+        private TextureView GetTotkC827DepthCopy19b(
+            CommandBufferScoped cbs,
+            ShaderCollection program,
+            int binding,
+            TextureView source)
+        {
+            if (!_totkC827DepthCopy19b ||
+                program == null ||
+                binding != 128 ||
+                source == null ||
+                !string.Equals(
+                    program.FragmentShaderHash,
+                    "c82797bafb11668589c15bbb3a52d39db43eb99210c803a9e7969f5032ea8eae",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            if (_totkC827DepthCopyView19b == null ||
+                _totkC827DepthCopyView19b.Info != source.Info)
+            {
+                _totkC827DepthCopyView19b?.Dispose();
+                _totkC827DepthCopyView19b =
+                    _gd.CreateTextureView(source.Info);
+
+                _totkC827DepthCopyLogged19b = false;
+            }
+
+            source.CopyTo(_totkC827DepthCopyView19b, 0, 0);
+
+            // TextureCopy.Copy faz a ida:
+            // DefaultAccessMask -> TransferRead
+            //
+            // Fazemos explicitamente o retorno do SOURCE para nao deixar
+            // nosso diagnostico introduzir uma dependencia incompleta.
+            TextureView.InsertImageBarrier(
+                _gd.Api,
+                cbs.CommandBuffer,
+                source.GetImage().Get(cbs).Value,
+                AccessFlags.TransferReadBit,
+                TextureStorage.DefaultAccessMask,
+                PipelineStageFlags.TransferBit,
+                PipelineStageFlags.AllCommandsBit,
+                source.Info.Format.ConvertAspectFlags(),
+                source.FirstLayer,
+                source.FirstLevel,
+                source.Info.GetLayers(),
+                source.Info.Levels);
+
+            _totkC827DepthCopyView19b.PrepareForUsage(
+                cbs,
+                PipelineStageFlags.FragmentShaderBit,
+                FeedbackLoopHazards);
+
+            if (!_totkC827DepthCopyLogged19b)
+            {
+                int srcStorage =
+                    System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(
+                        source.Storage);
+
+                int dstStorage =
+                    System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(
+                        _totkC827DepthCopyView19b.Storage);
+
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"[TOTK-C827-DEPTH-COPY19B] ACTIVE " +
+                    $"SRC={srcStorage:X} DST={dstStorage:X} " +
+                    $"FORMAT={source.VkFormat} " +
+                    $"SIZE={source.Width}x{source.Height}");
+
+                _totkC827DepthCopyLogged19b = true;
+            }
+
+            return _totkC827DepthCopyView19b;
+        }
+
+
+        // TOTK-C827-BARRIER-TRACE18
+        private static readonly bool _totkC827BarrierTrace18 =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_C827_BARRIER_TRACE") == "1";
+
+        private readonly HashSet<string> _totkC827BarrierStates18 =
+            new(StringComparer.Ordinal);
+
+        private void TraceTotkC827BarrierState18(
+            ShaderCollection program,
+            int binding,
+            TextureView view)
+        {
+            if (!_totkC827BarrierTrace18 ||
+                program == null ||
+                binding != 128 ||
+                view?.Storage == null ||
+                !string.Equals(
+                    program.FragmentShaderHash,
+                    "c82797bafb11668589c15bbb3a52d39db43eb99210c803a9e7969f5032ea8eae",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            int storageId =
+                System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(
+                    view.Storage);
+
+            string signature =
+                view.Storage.TotkGetBarrierDebugSignature18();
+
+            string key =
+                storageId.ToString("X") + "|" + signature;
+
+            if (!_totkC827BarrierStates18.Add(key))
+            {
+                return;
+            }
+
+            Logger.Info?.Print(
+                LogClass.Gpu,
+                $"[TOTK-C827-BARRIER-TRACE18] " +
+                $"B128 STORAGE={storageId:X} " +
+                $"FORMAT={view.Storage.VkFormat} " +
+                $"SIZE={view.Storage.Info.Width}x{view.Storage.Info.Height} " +
+                view.Storage.TotkGetBarrierDebugState18());
+        }
+
+        private void TraceTotkC827DepthProducer(
+            ShaderCollection program,
+            int binding,
+            TextureView view)
+        {
+            if (!_totkC827DepthProducerTrace ||
+                program == null ||
+                binding != 128 ||
+                view?.Storage == null ||
+                !string.Equals(
+                    program.FragmentShaderHash,
+                    "c82797bafb11668589c15bbb3a52d39db43eb99210c803a9e7969f5032ea8eae",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            int storageId =
+                System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(
+                    view.Storage);
+
+            if (!_totkC827DepthProducerDumpedStorages.Add(storageId))
+            {
+                return;
+            }
+
+            string[] history = view.Storage.TotkGetDepthDrawHistory();
+
+            Logger.Info?.Print(
+                LogClass.Gpu,
+                $"[TOTK-C827-DEPTH-PRODUCER12] " +
+                $"B128 STORAGE={storageId:X} " +
+                $"FORMAT={view.Storage.VkFormat} " +
+                $"SIZE={view.Storage.Info.Width}x{view.Storage.Info.Height} " +
+                $"HISTORY={history.Length}");
+
+            if (history.Length == 0)
+            {
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"[TOTK-C827-DEPTH-PRODUCER12] " +
+                    $"STORAGE={storageId:X} NO-PRIOR-DEPTH-DRAWS");
+
+                return;
+            }
+
+            for (int i = 0; i < history.Length; i++)
+            {
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"[TOTK-C827-DEPTH-PRODUCER12] " +
+                    $"STORAGE={storageId:X} " +
+                    $"SEQ={i} " +
+                    history[i]);
+            }
+        }
+
+        private void LogTotkC827Sampler()
+        {
+            if (_totkC827SamplerLogged ||
+                _program == null ||
+                !string.Equals(
+                    _program.FragmentShaderHash,
+                    "c82797bafb11668589c15bbb3a52d39db43eb99210c803a9e7969f5032ea8eae",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            ref TextureRef texture = ref _textureRefs[128];
+
+            if (texture.View == null || texture.SamplerHolder == null)
+            {
+                return;
+            }
+
+            SamplerCreateInfo info = texture.SamplerHolder.Info;
+
+            Logger.Info?.Print(
+                LogClass.Gpu,
+                $"[TOTK-C827-SAMPLERTRACE5] " +
+                $"B128 FORMAT={texture.View.VkFormat} " +
+                $"SIZE={texture.View.Width}x{texture.View.Height} " +
+                $"MIN={info.MinFilter} MAG={info.MagFilter} " +
+                $"ADDRU={info.AddressU} ADDRV={info.AddressV} ADDRP={info.AddressP} " +
+                $"COMPAREMODE={info.CompareMode} COMPAREOP={info.CompareOp} " +
+                $"MINLOD={info.MinLod} MAXLOD={info.MaxLod} " +
+                $"BIAS={info.MipLodBias} ANISO={info.MaxAnisotropy} " +
+                $"SEAMLESS={info.SeamlessCubemap}");
+
+            _totkC827SamplerLogged = true;
+        }
+
+        // TOTK-C827-NEUTRAL1
+        private static readonly string _totkC827NeutralBinding =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_C827_NEUTRAL_BINDING");
+        private readonly HashSet<int> _totkC827NeutralLogged = new();
+        private bool _totkC827BindingsLogged;
+
+        // TOTK-C827-DEPTHCONST4
+        // TOTK-C827-LINEAR-B128-6
+        private bool ShouldUseTotkC827LinearB128(ShaderCollection program, int binding)
+        {
+            bool active =
+                _totkC827LinearB128 &&
+                binding == 128 &&
+                program != null &&
+                string.Equals(
+                    program.FragmentShaderHash,
+                    "c82797bafb11668589c15bbb3a52d39db43eb99210c803a9e7969f5032ea8eae",
+                    StringComparison.OrdinalIgnoreCase);
+
+            if (active && !_totkC827LinearB128Logged)
+            {
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    "[TOTK-C827-LINEAR-B128-6] ACTIVE B128 SAMPLER=LINEAR");
+
+                _totkC827LinearB128Logged = true;
+            }
+
+            return active;
+        }
+
+        private bool ShouldUseTotkC827DepthConst(ShaderCollection program, int binding)
+        {
+            bool active =
+                binding == 128 &&
+                program != null &&
+                string.Equals(
+                    program.FragmentShaderHash,
+                    "c82797bafb11668589c15bbb3a52d39db43eb99210c803a9e7969f5032ea8eae",
+                    StringComparison.OrdinalIgnoreCase) &&
+                (_totkC827DepthConst == "0" || _totkC827DepthConst == "1");
+
+            if (active && !_totkC827DepthConstLogged)
+            {
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"[TOTK-C827-DEPTHCONST4] ACTIVE B128 VALUE={_totkC827DepthConst}");
+
+                _totkC827DepthConstLogged = true;
+            }
+
+            return active;
+        }
+
+        private bool ShouldNeutralizeTotkC827Binding(ShaderCollection program, int binding)
+        {
+            if (program == null ||
+                !string.Equals(
+                    program.FragmentShaderHash,
+                    "c82797bafb11668589c15bbb3a52d39db43eb99210c803a9e7969f5032ea8eae",
+                    StringComparison.OrdinalIgnoreCase) ||
+                !int.TryParse(_totkC827NeutralBinding, out int requested) ||
+                requested != binding)
+            {
+                return false;
+            }
+
+            if (_totkC827NeutralLogged.Add(binding))
+            {
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"[TOTK-C827-NEUTRAL1] ACTIVE T{binding}");
+            }
+
+            return true;
+        }
+
+        // TOTK-RESOURCE-TRACE1
+        // Diagnostic-only fingerprint of resources visible to the fragment stage.
+        public string GetTotkFragmentResourceSignature()
+        {
+            System.Text.StringBuilder sb = new();
+
+            for (int i = 0; i < _textureRefs.Length; i++)
+            {
+                ref TextureRef texture = ref _textureRefs[i];
+
+                if (texture.Stage == ShaderStage.Fragment && texture.View != null)
+                {
+                    TextureView view = texture.View;
+                    int viewId = RuntimeHelpers.GetHashCode(view);
+                    int storageId = view.Storage != null ? RuntimeHelpers.GetHashCode(view.Storage) : 0;
+                    int samplerId = texture.Sampler != null ? RuntimeHelpers.GetHashCode(texture.Sampler) : 0;
+
+                    sb.Append("T")
+                      .Append(i)
+                      .Append(":V").Append(viewId.ToString("X"))
+                      .Append(":S").Append(storageId.ToString("X"))
+                      // TOTK-WRITE-GENERATION1
+                      .Append(":G").Append(view.Storage?.TotkWriteGeneration ?? 0)
+                      .Append(":F").Append(view.VkFormat)
+                      .Append(":").Append(view.Width).Append("x").Append(view.Height)
+                      .Append(":L").Append(view.Layers)
+                      .Append(":FL").Append(view.FirstLayer)
+                      .Append(":FM").Append(view.FirstLevel)
+                      .Append(":SP").Append(samplerId.ToString("X"))
+                      .Append(';');
+                }
+            }
+
+            for (int i = 0; i < _imageRefs.Length; i++)
+            {
+                ref ImageRef image = ref _imageRefs[i];
+
+                if (image.Stage == ShaderStage.Fragment && image.View != null)
+                {
+                    TextureView view = image.View;
+                    int viewId = RuntimeHelpers.GetHashCode(view);
+                    int storageId = view.Storage != null ? RuntimeHelpers.GetHashCode(view.Storage) : 0;
+
+                    sb.Append("I")
+                      .Append(i)
+                      .Append(":V").Append(viewId.ToString("X"))
+                      .Append(":S").Append(storageId.ToString("X"))
+                      // TOTK-WRITE-GENERATION1
+                      .Append(":G").Append(view.Storage?.TotkWriteGeneration ?? 0)
+                      .Append(":F").Append(view.VkFormat)
+                      .Append(":").Append(view.Width).Append("x").Append(view.Height)
+                      .Append(":L").Append(view.Layers)
+                      .Append(":FL").Append(view.FirstLayer)
+                      .Append(":FM").Append(view.FirstLevel)
+                      .Append(';');
+                }
+            }
+
+            for (int i = 0; i < _textureArrayRefs.Length; i++)
+            {
+                ref ArrayRef<TextureArray> arrayRef = ref _textureArrayRefs[i];
+
+                if (arrayRef.Stage == ShaderStage.Fragment && arrayRef.Array != null)
+                {
+                    sb.Append("TA")
+                      .Append(i)
+                      .Append(":").Append(RuntimeHelpers.GetHashCode(arrayRef.Array).ToString("X"))
+                      .Append(';');
+                }
+            }
+
+            for (int i = 0; i < _imageArrayRefs.Length; i++)
+            {
+                ref ArrayRef<ImageArray> arrayRef = ref _imageArrayRefs[i];
+
+                if (arrayRef.Stage == ShaderStage.Fragment && arrayRef.Array != null)
+                {
+                    sb.Append("IA")
+                      .Append(i)
+                      .Append(":").Append(RuntimeHelpers.GetHashCode(arrayRef.Array).ToString("X"))
+                      .Append(';');
+                }
+            }
+
+            return sb.ToString();
+        }
+
 
         public DescriptorSetUpdater(VulkanRenderer gd, Device device)
         {
@@ -198,6 +638,45 @@ namespace Ryujinx.Graphics.Vulkan
                 SwizzleComponent.Blue,
                 SwizzleComponent.Alpha));
 
+            // TOTK-C827-DEPTHCONST4
+            _totkDepthZeroTexture = gd.CreateTextureView(new TextureCreateInfo(
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                4,
+                Format.D32Float,
+                DepthStencilMode.Depth,
+                Target.Texture2D,
+                SwizzleComponent.Red,
+                SwizzleComponent.Green,
+                SwizzleComponent.Blue,
+                SwizzleComponent.Alpha));
+
+            _totkDepthOneTexture = gd.CreateTextureView(new TextureCreateInfo(
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                4,
+                Format.D32Float,
+                DepthStencilMode.Depth,
+                Target.Texture2D,
+                SwizzleComponent.Red,
+                SwizzleComponent.Green,
+                SwizzleComponent.Blue,
+                SwizzleComponent.Alpha));
+
+            // TOTK-C827-LINEAR-B128-6
+            _totkC827LinearSampler = (SamplerHolder)gd.CreateSampler(
+                SamplerCreateInfo.Create(MinFilter.Linear, MagFilter.Linear));
+
             _dummySampler = (SamplerHolder)gd.CreateSampler(new SamplerCreateInfo(
                 MinFilter.Nearest,
                 MagFilter.Nearest,
@@ -220,6 +699,14 @@ namespace Ryujinx.Graphics.Vulkan
         {
             MemoryOwner<byte> dummyTextureData = MemoryOwner<byte>.RentCleared(4);
             _dummyTexture.SetData(dummyTextureData);
+
+            // TOTK-C827-DEPTHCONST4
+            MemoryOwner<byte> totkDepthZeroData = MemoryOwner<byte>.RentCleared(4);
+            _totkDepthZeroTexture.SetData(totkDepthZeroData);
+
+            MemoryOwner<byte> totkDepthOneData = MemoryOwner<byte>.RentCleared(4);
+            BitConverter.TryWriteBytes(totkDepthOneData.Span, 1.0f);
+            _totkDepthOneTexture.SetData(totkDepthOneData);
 
             if (isMainPipeline)
             {
@@ -383,16 +870,6 @@ namespace Ryujinx.Graphics.Vulkan
 
         public void SetProgram(CommandBufferScoped cbs, ShaderCollection program, bool isBound)
         {
-            if (!Ryujinx.Common.Diagnostics.NeoGraphicsSettings.HugareOptimizationsEnabled)
-            {
-                if (!program.HasSameLayout(_program)) AdvancePdSequence();
-                _program = program;
-                _updateDescriptorCacheCbIndex = true;
-                _dirty |= DirtyFlags.All;
-                _lastUniformDescriptorSetValid = false;
-                return;
-            }
-
             ShaderCollection previousProgram = _program;
             bool sameLayout = program.HasSameLayout(previousProgram);
             bool sameBindPoint = previousProgram != null && program.IsCompute == previousProgram.IsCompute;
@@ -412,6 +889,50 @@ namespace Ryujinx.Graphics.Vulkan
 
             _program = program;
 
+            // TOTK-C827-BINDINGS3
+            if (!_totkC827BindingsLogged &&
+                string.Equals(
+                    program.FragmentShaderHash,
+                    "c82797bafb11668589c15bbb3a52d39db43eb99210c803a9e7969f5032ea8eae",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                System.Text.StringBuilder sb = new();
+
+                if (program.BindingSegments.Length > PipelineBase.TextureSetIndex)
+                {
+                    foreach (ResourceBindingSegment segment in program.BindingSegments[PipelineBase.TextureSetIndex])
+                    {
+                        sb.Append("B")
+                          .Append(segment.Binding)
+                          .Append(":C").Append(segment.Count)
+                          .Append(":T").Append(segment.Type)
+                          .Append(":A").Append(segment.IsArray ? 1 : 0)
+                          .Append(';');
+                    }
+                }
+
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"[TOTK-C827-BINDINGS3] TEXTURES={sb}");
+
+                _totkC827BindingsLogged = true;
+            }
+
+            // TOTK-C827-FORCE-TEXTURE-DIRTY2
+            // The descriptor layout can be fully reused across program switches.
+            // Force the texture set to be rebuilt while this diagnostic is active,
+            // otherwise the neutral binding may never reach Vulkan.
+            if ((!string.IsNullOrWhiteSpace(_totkC827NeutralBinding) ||
+                 !string.IsNullOrWhiteSpace(_totkC827DepthConst) ||
+                 _totkC827LinearB128) &&
+                string.Equals(
+                    program.FragmentShaderHash,
+                    "c82797bafb11668589c15bbb3a52d39db43eb99210c803a9e7969f5032ea8eae",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                programDirty |= DirtyFlags.Texture;
+            }
+
             if (programDirty != DirtyFlags.None)
             {
                 _updateDescriptorCacheCbIndex = true;
@@ -423,6 +944,29 @@ namespace Ryujinx.Graphics.Vulkan
                 }
             }
 
+            _programSwitches++;
+
+            if (sameLayout)
+            {
+                _sameLayoutProgramSwitches++;
+            }
+
+            if (programDirty == DirtyFlags.None)
+            {
+                _fullyReusedProgramSwitches++;
+            }
+            else if (programDirty != DirtyFlags.All)
+            {
+                _partiallyReusedProgramSwitches++;
+            }
+
+            if ((_programSwitches & 0xffff) == 0)
+            {
+                Ryujinx.Common.Logging.Logger.Info?.Print(
+                    Ryujinx.Common.Logging.LogClass.Gpu,
+                    $"[NEOV2-DESCRIPTOR-LAYOUT-REUSE1] switches={_programSwitches} sameLayout={_sameLayoutProgramSwitches} " +
+                    $"fullReuse={_fullyReusedProgramSwitches} partialReuse={_partiallyReusedProgramSwitches}");
+            }
         }
 
         // Descriptor sets remain bound across compatible Vulkan pipeline layouts. When
@@ -609,7 +1153,7 @@ namespace Ryujinx.Graphics.Vulkan
                 iRef.View?.ClearUsage(FeedbackLoopHazards);
                 view?.PrepareForUsage(cbs, stage.ConvertToPipelineStageFlags(), FeedbackLoopHazards);
 
-                iRef = new(stage, view, view.GetImageView(), ((SamplerHolder)sampler)?.GetSampler());
+                iRef = new(stage, view, view.GetImageView(), (SamplerHolder)sampler);
             }
             else
             {
@@ -631,7 +1175,7 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 view.Storage.QueueWriteToReadBarrier(cbs, AccessFlags.ShaderReadBit, stage.ConvertToPipelineStageFlags());
 
-                _textureRefs[binding] = new(stage, view, view.GetIdentityImageView(), ((SamplerHolder)sampler)?.GetSampler());
+                _textureRefs[binding] = new(stage, view, view.GetIdentityImageView(), (SamplerHolder)sampler);
 
                 SignalDirty(DirtyFlags.Texture);
             }
@@ -739,6 +1283,7 @@ namespace Ryujinx.Graphics.Vulkan
 
             for (int i = 0; i < buffers.Length; i++)
             {
+                ulong assignments = ++_uniformAssignments;
                 BufferAssignment assignment = buffers[i];
                 BufferRange buffer = assignment.Range;
                 int index = assignment.Binding;
@@ -761,12 +1306,62 @@ namespace Ryujinx.Graphics.Vulkan
 
                 if (!currentBufferRef.Equals(newRef) || currentInfo.Range != info.Range)
                 {
+                    _uniformBindingChanges++;
+
+                    bool bufferChanged = currentBufferRef.Buffer != newRef.Buffer;
+                    bool offsetChanged = currentBufferRef.Offset != newRef.Offset;
+                    bool rangeChanged = currentInfo.Range != info.Range;
+                    bool writeChanged = currentBufferRef.Write != newRef.Write;
+
+                    if (bufferChanged || rangeChanged || writeChanged)
+                    {
+                        _uniformPendingDescriptorChange = true;
+                    }
+                    else if (offsetChanged)
+                    {
+                        _uniformPendingOffsetChange = true;
+                    }
+
+                    if (bufferChanged)
+                    {
+                        _uniformBufferChanges++;
+                    }
+                    else if (offsetChanged && rangeChanged && !writeChanged)
+                    {
+                        _uniformOffsetRangeChanges++;
+                    }
+                    else if (offsetChanged && !rangeChanged && !writeChanged)
+                    {
+                        _uniformOffsetOnlyChanges++;
+                    }
+                    else if (!offsetChanged && rangeChanged && !writeChanged)
+                    {
+                        _uniformRangeOnlyChanges++;
+                    }
+                    else
+                    {
+                        _uniformOtherSameBufferChanges++;
+                    }
+
                     _uniformSet.Clear(index);
                     _uniformSetPd[index] = 0;
 
                     currentInfo = info;
                     currentBufferRef = newRef;
                     changed = true;
+                }
+
+                if ((assignments & 0xfffff) == 0)
+                {
+                    Ryujinx.Common.Logging.Logger.Info?.Print(
+                        Ryujinx.Common.Logging.LogClass.Gpu,
+                        $"[NEOV2-UNIFORM-CHANGE-PROFILE1] assignments={assignments} changes={_uniformBindingChanges} " +
+                        $"buffer={_uniformBufferChanges} offsetOnly={_uniformOffsetOnlyChanges} rangeOnly={_uniformRangeOnlyChanges} " +
+                        $"offsetRange={_uniformOffsetRangeChanges} otherSameBuffer={_uniformOtherSameBufferChanges} " +
+                        $"flushes={_uniformFlushes} offsetOnlyFlushes={_uniformOffsetOnlyFlushes} " +
+                        $"descriptorFlushes={_uniformDescriptorFlushes} otherFlushes={_uniformOtherFlushes} " +
+                        $"dynamicFlushes={_dynamicUniformFlushes} dynamicUpdates={_dynamicUniformDescriptorUpdates} " +
+                        $"dynamicRebinds={_dynamicUniformOffsetRebinds} dynamicResolvedChanges={_dynamicUniformResolvedChanges}");
                 }
             }
 
@@ -783,6 +1378,9 @@ namespace Ryujinx.Graphics.Vulkan
 
         public void UpdateAndBindDescriptorSets(CommandBufferScoped cbs, PipelineBindPoint pbp)
         {
+            // TOTK-C827-SAMPLERTRACE5
+            LogTotkC827Sampler();
+
             if ((_dirty & DirtyFlags.All) == 0)
             {
                 return;
@@ -792,6 +1390,21 @@ namespace Ryujinx.Graphics.Vulkan
 
             if ((_dirty & DirtyFlags.Uniform) == DirtyFlags.Uniform)
             {
+                _uniformFlushes++;
+
+                if (_uniformPendingDescriptorChange)
+                {
+                    _uniformDescriptorFlushes++;
+                }
+                else if (_uniformPendingOffsetChange)
+                {
+                    _uniformOffsetOnlyFlushes++;
+                }
+                else
+                {
+                    _uniformOtherFlushes++;
+                }
+
                 if (program.UsePushDescriptors)
                 {
                     UpdateAndBindUniformBufferPd(cbs);
@@ -807,6 +1420,9 @@ namespace Ryujinx.Graphics.Vulkan
                         UpdateAndBind(cbs, program, PipelineBase.UniformSetIndex, pbp);
                     }
                 }
+
+                _uniformPendingOffsetChange = false;
+                _uniformPendingDescriptorChange = false;
             }
 
             if ((_dirty & DirtyFlags.Storage) == DirtyFlags.Storage)
@@ -890,12 +1506,12 @@ namespace Ryujinx.Graphics.Vulkan
                 return;
             }
 
+            _dynamicUniformFlushes++;
+
             Auto<DisposableBuffer> dummyBuffer = _dummyBuffer?.GetBuffer();
             bool descriptorChanged = !_lastUniformDescriptorSetValid;
             int dynamicOffsetCount = 0;
             Span<uint> dynamicOffsets = stackalloc uint[Constants.MaxUniformBufferBindings];
-            Span<uint> offsetsByBinding = stackalloc uint[Constants.MaxUniformBufferBindings];
-            offsetsByBinding.Clear();
 
             foreach (ResourceBindingSegment segment in bindingSegments)
             {
@@ -938,21 +1554,17 @@ namespace Ryujinx.Graphics.Vulkan
                             currentDescriptor.Offset != descriptor.Offset ||
                             currentDescriptor.Range != descriptor.Range;
 
+                        if (_lastUniformDescriptorSetValid && resolvedDescriptorChanged)
+                        {
+                            _dynamicUniformResolvedChanges++;
+                        }
+
                         descriptorChanged |= resolvedDescriptorChanged;
                         currentDescriptor = descriptor;
                         _uniformDynamicOffsets[index] = dynamicOffset;
                     }
 
-                    offsetsByBinding[index] = _uniformDynamicOffsets[index];
-                }
-            }
-
-            // Include unused declared bindings with offset zero (their descriptor may be a dummy buffer).
-            foreach (ResourceBindingSegment segment in program.ClearSegments[PipelineBase.UniformSetIndex])
-            {
-                for (int i = 0; i < segment.Count; i++)
-                {
-                    dynamicOffsets[dynamicOffsetCount++] = offsetsByBinding[segment.Binding + i];
+                    dynamicOffsets[dynamicOffsetCount++] = _uniformDynamicOffsets[index];
                 }
             }
 
@@ -986,6 +1598,11 @@ namespace Ryujinx.Graphics.Vulkan
 
                 _lastUniformDescriptorSet = sets[0];
                 _lastUniformDescriptorSetValid = true;
+                _dynamicUniformDescriptorUpdates++;
+            }
+            else
+            {
+                _dynamicUniformOffsetRebinds++;
             }
 
             _gd.Api.CmdBindDescriptorSets(
@@ -1095,8 +1712,55 @@ namespace Ryujinx.Graphics.Vulkan
                                 ref DescriptorImageInfo texture = ref textures[i];
                                 ref TextureRef refs = ref _textureRefs[binding + i];
 
-                                texture.ImageView = refs.ImageView?.Get(cbs).Value ?? default;
+                                int textureBinding = binding + i;
+
+                                // TOTK-C827-DEPTH-PRODUCER12-DS
+                                TraceTotkC827DepthProducer(
+                                    program,
+                                    textureBinding,
+                                    refs.View);
+
+                                TextureView totkDepthCopy19b =
+                                    GetTotkC827DepthCopy19b(
+                                        cbs,
+                                        program,
+                                        textureBinding,
+                                        refs.View);
+
+                                TraceTotkC827BarrierState18(
+                                    program,
+                                    textureBinding,
+                                    refs.View);
+
+                                if (totkDepthCopy19b != null)
+                                {
+                                    texture.ImageView =
+                                        totkDepthCopy19b.GetImageView().Get(cbs).Value;
+                                }
+                                else if (ShouldUseTotkC827DepthConst(program, textureBinding))
+                                {
+                                    TextureView depthConstTexture =
+                                        _totkC827DepthConst == "1"
+                                            ? _totkDepthOneTexture
+                                            : _totkDepthZeroTexture;
+
+                                    texture.ImageView = depthConstTexture.GetImageView().Get(cbs).Value;
+                                }
+                                else if (ShouldNeutralizeTotkC827Binding(program, textureBinding))
+                                {
+                                    texture.ImageView = _dummyTexture.GetImageView().Get(cbs).Value;
+                                }
+                                else
+                                {
+                                    texture.ImageView = refs.ImageView?.Get(cbs).Value ?? default;
+                                }
+
                                 texture.Sampler = refs.Sampler?.Get(cbs).Value ?? default;
+
+                                if (ShouldUseTotkC827LinearB128(program, textureBinding))
+                                {
+                                    texture.Sampler = _totkC827LinearSampler.GetSampler().Get(cbs).Value;
+                                }
 
                                 if (texture.ImageView.Handle == 0)
                                 {
@@ -1216,8 +1880,38 @@ namespace Ryujinx.Graphics.Vulkan
                             ref DescriptorImageInfo texture = ref textures[i];
                             ref TextureRef refs = ref _textureRefs[binding + i];
 
-                            texture.ImageView = refs.ImageView?.Get(cbs).Value ?? default;
+                            int textureBinding = binding + i;
+
+                            // TOTK-C827-DEPTH-PRODUCER12-DS
+                            TraceTotkC827DepthProducer(
+                                program,
+                                textureBinding,
+                                refs.View);
+
+                            if (ShouldUseTotkC827DepthConst(program, textureBinding))
+                            {
+                                TextureView depthConstTexture =
+                                    _totkC827DepthConst == "1"
+                                        ? _totkDepthOneTexture
+                                        : _totkDepthZeroTexture;
+
+                                texture.ImageView = depthConstTexture.GetImageView().Get(cbs).Value;
+                            }
+                            else if (ShouldNeutralizeTotkC827Binding(program, textureBinding))
+                            {
+                                texture.ImageView = _dummyTexture.GetImageView().Get(cbs).Value;
+                            }
+                            else
+                            {
+                                texture.ImageView = refs.ImageView?.Get(cbs).Value ?? default;
+                            }
+
                             texture.Sampler = refs.Sampler?.Get(cbs).Value ?? default;
+
+                            if (ShouldUseTotkC827LinearB128(program, textureBinding))
+                            {
+                                texture.Sampler = _totkC827LinearSampler.GetSampler().Get(cbs).Value;
+                            }
 
                             if (texture.ImageView.Handle == 0)
                             {
@@ -1425,7 +2119,10 @@ namespace Ryujinx.Graphics.Vulkan
         {
             if (disposing)
             {
+                _totkDepthZeroTexture.Dispose();
+                _totkDepthOneTexture.Dispose();
                 _dummyTexture.Dispose();
+                _totkC827LinearSampler.Dispose();
                 _dummySampler.Dispose();
                 _templateUpdater.Dispose();
             }

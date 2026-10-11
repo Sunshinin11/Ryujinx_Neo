@@ -18,6 +18,7 @@ using Ryujinx.UI.Common.SystemInfo;
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Ryujinx.Ava
@@ -36,6 +37,8 @@ namespace Ryujinx.Ava
         public static partial int MessageBoxA(nint hWnd, [MarshalAs(UnmanagedType.LPStr)] string text, [MarshalAs(UnmanagedType.LPStr)] string caption, uint type);
 
         private const uint MbIconwarning = 0x30;
+        private static PosixSignalRegistration _sigTermRegistration;
+        private static int _gracefulShutdownRequested;
 
         [STAThread]
         public static void Main(string[] args)
@@ -116,6 +119,19 @@ namespace Ryujinx.Ava
             // Initialize the logger system.
             LoggerModule.Initialize();
 
+            // SAVE-BACKUP1: run before the emulated filesystem can modify saves.
+            SaveDataBackupManager.RunPreflight();
+
+            // STEAM-TERM1: Steam stops non-Steam games with SIGTERM. Route it
+            // through the normal window close path so the guest, GPU and
+            // save-data services finish shutting down before the process exits.
+            if (OperatingSystem.IsLinux())
+            {
+                _sigTermRegistration = PosixSignalRegistration.Create(
+                    PosixSignal.SIGTERM,
+                    HandleTerminationSignal);
+            }
+
             // Initialize Discord integration.
             DiscordIntegrationModule.Initialize();
 
@@ -145,6 +161,33 @@ namespace Ryujinx.Ava
             {
                 MainWindow.DeferLoadApplication(CommandLineState.LaunchPathArg, CommandLineState.LaunchApplicationId, CommandLineState.StartFullscreenArg);
             }
+        }
+
+        private static void HandleTerminationSignal(PosixSignalContext context)
+        {
+            context.Cancel = true;
+
+            if (Interlocked.Exchange(ref _gracefulShutdownRequested, 1) != 0)
+            {
+                return;
+            }
+
+            Logger.Notice.Print(LogClass.Application, "SIGTERM received; stopping the emulated application cleanly.");
+
+            Dispatcher.UIThread.Post(() =>
+            {
+                var viewModel = MainWindow.MainWindowViewModel;
+
+                if (viewModel?.Window != null)
+                {
+                    viewModel.IsClosing = true;
+                    viewModel.Window.Close();
+                }
+                else
+                {
+                    Environment.Exit(0);
+                }
+            }, DispatcherPriority.Send);
         }
 
         public static void ReloadConfig()

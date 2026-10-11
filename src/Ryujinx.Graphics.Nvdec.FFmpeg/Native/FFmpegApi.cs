@@ -122,11 +122,22 @@ namespace Ryujinx.Graphics.Nvdec.FFmpeg.Native
         [LibraryImport(AvCodecLibraryName)]
         internal static unsafe partial int avcodec_version();
 
-        // NEOV2-VP9EDEN1: opcoes do contexto (threads, flags) sem depender do layout de AVCodecContext.
-        [LibraryImport(AvUtilLibraryName, StringMarshalling = StringMarshalling.Utf8)]
-        internal static unsafe partial int av_opt_set(void* obj, string name, string val, int searchFlags);
+        [LibraryImport(
+            AvUtilLibraryName,
+            StringMarshalling = StringMarshalling.Utf8)]
+        internal static unsafe partial int av_opt_set(
+            void* obj,
+            string name,
+            string val,
+            int searchFlags);
 
-        [LibraryImport(AvUtilLibraryName, StringMarshalling = StringMarshalling.Utf8)]
-        internal static unsafe partial int av_opt_set_int(void* obj, string name, long val, int searchFlags);
+        [LibraryImport(
+            AvUtilLibraryName,
+            StringMarshalling = StringMarshalling.Utf8)]
+        internal static unsafe partial int av_opt_set_int(
+            void* obj,
+            string name,
+            long val,
+            int searchFlags);
     }
 }

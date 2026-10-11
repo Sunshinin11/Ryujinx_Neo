@@ -234,7 +234,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Twod
             TwodTexture dstCopyTexture = Unsafe.As<uint, TwodTexture>(ref _state.State.SetDstFormat);
             TwodTexture srcCopyTexture = Unsafe.As<uint, TwodTexture>(ref _state.State.SetSrcFormat);
 
-            if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled && srcCopyTexture.Depth != 1)
+            if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled &&
+                srcCopyTexture.Depth != 1)
             {
                 srcCopyTexture.Depth = 1;
             }
@@ -306,13 +307,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Twod
                 IsCopyRegionComplete(srcCopyTexture, srcCopyTextureFormat, srcX1, srcY1, srcX2, srcY2) &&
                 IsCopyRegionComplete(dstCopyTexture, dstCopyTextureFormat, dstX1, dstY1, dstX2, dstY2);
 
-            // NEOV2 TWOD-GPUDST2: a copia direta na CPU escreve na memoria do destino. Se ja existe uma textura
-            // do cache nesse endereco (normalmente escrita pela GPU), essa escrita obriga a baixar a textura inteira
-            // da GPU e esperar antes de sobrescreve-la (Diablo II: ~40% da GPU thread por quadro). Nesse caso a
-            // copia e feita na GPU, como o Eden faz (Fermi2D::Blit -> AccelerateSurfaceCopy).
-            // A GPUDST1 procurava so uma textura com os mesmos parametros e nao encontrava a do Diablo; aqui basta
-            // qualquer textura sobreposta ao endereco do destino.
-            if (canDirectCopy && memoryManager.Physical.TextureCache.HasTextureAt(memoryManager, dstCopyTexture.Address.Pack()))
+            // NEOV2 TWOD-GPUDST2: se uma textura GPU já cobre o destino,
+            // evita a cópia direta pela CPU e mantém a operação do lado da GPU.
+            if (canDirectCopy &&
+                memoryManager.Physical.TextureCache.HasTextureAt(
+                    memoryManager,
+                    dstCopyTexture.Address.Pack()))
             {
                 canDirectCopy = false;
             }

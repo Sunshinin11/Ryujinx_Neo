@@ -102,20 +102,15 @@ namespace Ryujinx.Memory.Tracking
         }
 
         /// <summary>
-        /// NEOV2 NCE-PROT1: applies the protection this region demands again, after something outside the tracking
-        /// (a guest memory permission change) overwrote the host page protection.
-        /// Regions that need no protection are left alone, so the new permission stays in effect for them.
+        /// Restores tracking protection after an external permission change.
         /// </summary>
-        /// <returns>True if the tracking protection was applied again, false otherwise</returns>
         public bool RestoreProtectionAfterExternalChange()
         {
             MemoryPermission permission = GetRequiredPermission();
 
             if (permission == MemoryPermission.ReadAndWrite)
             {
-                // The page may have been left with a different permission; make sure the next change is applied.
                 _lastPermission = MemoryPermission.Invalid;
-
                 return false;
             }
 
@@ -126,16 +121,32 @@ namespace Ryujinx.Memory.Tracking
         }
 
         /// <summary>
+        /// Updates the cached protection without applying it to the memory manager.
+        /// This allows callers that own the tracking lock to coalesce adjacent
+        /// regions with the same permission into a single protection operation.
+        /// </summary>
+        internal bool TryUpdateProtection(out MemoryPermission permission)
+        {
+            permission = GetRequiredPermission();
+
+            if (_lastPermission != permission)
+            {
+                _lastPermission = permission;
+
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
         /// Updates the protection for this virtual region.
         /// </summary>
         public bool UpdateProtection()
         {
-            MemoryPermission permission = GetRequiredPermission();
-
-            if (_lastPermission != permission)
+            if (TryUpdateProtection(out MemoryPermission permission))
             {
                 _tracking.ProtectVirtualRegion(this, permission, Guest);
-                _lastPermission = permission;
 
                 return true;
             }

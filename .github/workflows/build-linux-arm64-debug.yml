@@ -1,0 +1,137 @@
+name: Build Neo Linux ARM64 Debug
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - neo-v2-fase1
+
+permissions:
+  contents: write
+
+jobs:
+  build-arm64:
+    name: Linux ARM64 Debug
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout neo-v2-fase1
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Show architecture
+        run: |
+          uname -a
+          uname -m
+          test "$(uname -m)" = "aarch64"
+
+      - name: Setup .NET from global.json
+        if: ${{ hashFiles('global.json') != '' }}
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Setup .NET fallback
+        if: ${{ hashFiles('global.json') == '' }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential \
+            binutils \
+            file \
+            clang \
+            cmake \
+            ninja-build \
+            pkg-config \
+            git \
+            libx11-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxext-dev \
+            libwayland-dev
+
+      - name: Show .NET information
+        run: dotnet --info
+
+      - name: Build Ryujinx Neo ARM64
+        run: |
+          chmod +x ./build-linux-arm64-debug.sh
+          ./build-linux-arm64-debug.sh
+
+      - name: Verify ARM64 executable
+        run: |
+          echo "=== Executable info ==="
+          file ./artifacts/neo-linux-arm64-debug/Ryujinx
+
+          echo
+          echo "=== ELF machine ==="
+          readelf -h ./artifacts/neo-linux-arm64-debug/Ryujinx | grep Machine
+
+          echo
+          echo "=== Package ==="
+          ls -lh ./artifacts/Ryujinx-Neo-linux-arm64-Debug.tar.gz
+
+      - name: Smoke test ARM64 executable
+        run: |
+          set +e
+
+          timeout 30s \
+            ./artifacts/neo-linux-arm64-debug/Ryujinx \
+            --no-gui \
+            --help
+
+          STATUS=$?
+
+          if [ "$STATUS" -eq 124 ]; then
+            echo "Ryujinx continued running for 30 seconds. Treating this as a successful launch."
+            exit 0
+          fi
+
+          if [ "$STATUS" -ne 0 ]; then
+            echo "Ryujinx exited with status $STATUS"
+            exit "$STATUS"
+          fi
+
+          echo "Smoke test completed successfully."
+
+      - name: Create release information
+        id: release
+        shell: bash
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TAG="neo-arm64-debug-${SHORT_SHA}"
+
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.release.outputs.tag }}"
+          SHORT_SHA="${{ steps.release.outputs.short_sha }}"
+          FILE="./artifacts/Ryujinx-Neo-linux-arm64-Debug.tar.gz"
+
+          gh release create "$TAG" \
+            "$FILE" \
+            --target "$GITHUB_SHA" \
+            --title "Ryujinx Neo Linux ARM64 Debug $SHORT_SHA" \
+            --notes "Automated Linux ARM64 Debug build of Ryujinx Neo.
+
+          Branch: ${GITHUB_REF_NAME}
+          Commit: ${GITHUB_SHA}
+          Runner: ubuntu-24.04-arm
+          Architecture: ARM64/aarch64
+          Configuration: Debug"

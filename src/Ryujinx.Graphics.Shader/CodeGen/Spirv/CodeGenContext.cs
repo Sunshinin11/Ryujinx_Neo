@@ -12,6 +12,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
     partial class CodeGenContext : Module
     {
+        // SHADOWTAP-E29 dbg: Private vec4 holding the operands of the first depth-compare tap.
+        public Spv.Generator.Instruction TotkDbgVar;
+
         private const uint SpirvVersionMajor = 1;
         private const uint SpirvVersionMinor = 3;
         private const uint SpirvVersionRevision = 0;

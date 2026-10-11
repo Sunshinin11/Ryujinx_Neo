@@ -8,6 +8,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
 {
     static partial class InstEmit
     {
+        private static readonly bool _voteAllFalseE9 =
+            System.Environment.GetEnvironmentVariable("RYUJINX_VOTEALL_FALSE") == "1";
+
         public static void Fswzadd(EmitterContext context)
         {
             InstFswzadd op = context.GetOp<InstFswzadd>();
@@ -51,6 +54,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand pred = GetPredicate(context, op.SrcPred, op.SrcPredInv);
             Operand res = EmitVote(context, op.VoteMode, pred);
+
+            // VOTEALL-E9 (diagnostic): in fragment shaders force VOTE.ALL to false so
+            // NVIDIA-style warp-aggregated atomics take their per-thread fallback path.
+            if (_voteAllFalseE9 &&
+                res != null &&
+                op.VoteMode == VoteMode.All &&
+                context.TranslatorContext.Definitions.Stage == ShaderStage.Fragment)
+            {
+                res = Const(IrConsts.False);
+            }
 
             if (res != null)
             {

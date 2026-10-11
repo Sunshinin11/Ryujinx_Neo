@@ -11,6 +11,7 @@ using Ryujinx.Ava.UI.Models.Input;
 using Ryujinx.Ava.UI.Windows;
 using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Configuration.Multiplayer;
+using Ryujinx.Common.Diagnostics;
 using Ryujinx.Common.GraphicsDriver;
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
@@ -238,6 +239,8 @@ namespace Ryujinx.Ava.UI.ViewModels
         public MemoryConfiguration DramSize { get; set; }
         public bool EnableShaderCache { get; set; }
         public bool EnableTextureRecompression { get; set; }
+        public int DrawFlushModeIndex { get; set; }
+        public int BufferReadbackModeIndex { get; set; }
         public bool EnableMacroHLE { get; set; }
         public bool EnableColorSpacePassthrough { get; set; }
         public bool ColorSpacePassthroughAvailable => IsMacOS;
@@ -594,6 +597,8 @@ namespace Ryujinx.Ava.UI.ViewModels
             // Physical devices are queried asynchronously hence the preferred index config value is loaded in LoadAvailableGpus().
             EnableShaderCache = config.Graphics.EnableShaderCache;
             EnableTextureRecompression = config.Graphics.EnableTextureRecompression;
+            DrawFlushModeIndex = (int)config.Graphics.DrawFlushMode.Value;
+            BufferReadbackModeIndex = (int)config.Graphics.BufferReadbackMode.Value;
             EnableMacroHLE = config.Graphics.EnableMacroHLE;
             EnableColorSpacePassthrough = config.Graphics.EnableColorSpacePassthrough;
             ResolutionScale = config.Graphics.ResScale == -1 ? 4 : config.Graphics.ResScale - 1;
@@ -703,6 +708,10 @@ namespace Ryujinx.Ava.UI.ViewModels
             config.Graphics.PreferredGpu.Value = _gpuIds.ElementAtOrDefault(PreferredGpuIndex);
             config.Graphics.EnableShaderCache.Value = EnableShaderCache;
             config.Graphics.EnableTextureRecompression.Value = EnableTextureRecompression;
+            config.Graphics.DrawFlushMode.Value = (DrawFlushMode)DrawFlushModeIndex;
+            config.Graphics.BufferReadbackMode.Value = (BufferReadbackMode)BufferReadbackModeIndex;
+            NeoGraphicsSettings.DrawFlushGlobalMode = config.Graphics.DrawFlushMode.Value;
+            NeoGraphicsSettings.BufferReadbackGlobalMode = config.Graphics.BufferReadbackMode.Value;
             config.Graphics.EnableMacroHLE.Value = EnableMacroHLE;
             config.Graphics.EnableColorSpacePassthrough.Value = EnableColorSpacePassthrough;
             config.Graphics.ResScale.Value = ResolutionScale == 4 ? -1 : ResolutionScale + 1;

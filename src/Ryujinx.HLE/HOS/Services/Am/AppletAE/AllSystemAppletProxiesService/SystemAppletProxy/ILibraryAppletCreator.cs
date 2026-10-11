@@ -23,32 +23,32 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         }
 
         [CommandCmif(3)] // 20.0.0+
-        // CreateLibraryAppletEx(u32, u32, u64) -> object<nn::am::service::ILibraryAppletAccessor>
-        // NEOV2-COSMIC4: portado do Ryubing (6bb2af009, ryubing!69); o Eden tem o mesmo comando
-        // (library_applet_creator.cpp). Sem ele o MARVEL Cosmic Invasion travava ao apertar Start
-        // (ServiceNotImplementedException: ILibraryAppletCreator: 3).
         public ResultCode CreateLibraryAppletEx(ServiceCtx context)
         {
             if (!Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled)
             {
-                // Com a chave desligada o comando se comporta como se nao existisse: com "Ignorar servicos
-                // ausentes" ligado, so avisa e responde sucesso sem criar objeto; desligado, lanca
-                // ServiceNotImplementedException, como qualquer comando ausente.
                 if (context.Device.Configuration.IgnoreMissingServices)
                 {
-                    Logger.Warning?.Print(LogClass.KernelIpc, $"Missing service {GetType().FullName}: 3 ignored");
+                    Logger.Warning?.Print(
+                        LogClass.KernelIpc,
+                        $"Missing service {GetType().FullName}: 3 ignored");
 
                     return ResultCode.Success;
                 }
 
-                throw new Ryujinx.HLE.Exceptions.ServiceNotImplementedException(this, context, $"{GetType().FullName}: 3");
+                throw new Ryujinx.HLE.Exceptions.ServiceNotImplementedException(
+                    this,
+                    context,
+                    $"{GetType().FullName}: 3");
             }
 
             AppletId appletId = (AppletId)context.RequestData.ReadInt32();
-            _ = context.RequestData.ReadInt32(); // libraryAppletMode
-            _ = context.RequestData.ReadUInt64(); // threadId
+            _ = context.RequestData.ReadInt32();
+            _ = context.RequestData.ReadUInt64();
 
-            MakeObject(context, new ILibraryAppletAccessor(appletId, context.Device.System));
+            MakeObject(
+                context,
+                new ILibraryAppletAccessor(appletId, context.Device.System));
 
             return ResultCode.Success;
         }

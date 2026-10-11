@@ -113,7 +113,7 @@ namespace Ryujinx.Graphics.Vulkan
                 }
             }
 
-            UseDynamicUniformBuffers = Ryujinx.Common.Diagnostics.NeoGraphicsSettings.HugareOptimizationsEnabled && !usePushDescriptors &&
+            UseDynamicUniformBuffers = !usePushDescriptors &&
                 uniformDescriptorCount > 0 &&
                 uniformDescriptorCount <= gd.MaxDynamicUniformBuffers;
 

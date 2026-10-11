@@ -1,6 +1,6 @@
 [submodule "src/KenjinxAndroid/app/src/main/cpp/libraries/adrenotools"]
 	path = src/KenjinxAndroid/app/src/main/cpp/libraries/adrenotools
-	url = https://github.com/bylaws/libadrenotools.git
+	url = https://git.ryujinx.app/kenji-nx/libadrenotools.git
 [submodule "src/KenjinxAndroid/app/src/main/cpp/libraries/openal"]
 	path = src/KenjinxAndroid/app/src/main/cpp/libraries/openal
 	url = https://git.ryujinx.app/kenji-nx/openal-soft.git

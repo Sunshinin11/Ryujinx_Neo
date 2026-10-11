@@ -1,4 +1,4 @@
-﻿using Ryujinx.Common.Diagnostics;
+using Ryujinx.Common.Diagnostics;
 using Ryujinx.Common.Logging;
 using System;
 using System.Collections.Concurrent;
@@ -52,7 +52,9 @@ namespace Ryujinx.Graphics.Vulkan
         private bool _fastFlushMode;
         private int _drawFlushesThisFrame;
         private int _drawFlushesSuppressed;
-        private readonly DrawFlushMode _drawFlushMode = NeoGraphicsSettings.DrawFlushMode;
+
+        private readonly DrawFlushMode _drawFlushMode =
+            NeoGraphicsSettings.DrawFlushMode;
 
         // NEOV2 Etapa 16: intervalos originais restaurados (a Etapa 15 piorou o TOTK).
         // Contadores de flush por motivo, registrados a cada 5 s. Flushes forcados por
@@ -157,7 +159,8 @@ namespace Ryujinx.Graphics.Vulkan
                         return false;
                     }
                 }
-                else if (_gd.IsTurnip && _drawFlushesThisFrame >= MaxDrawFlushesPerFrame)
+                else if (_gd.IsTurnip &&
+                         _drawFlushesThisFrame >= MaxDrawFlushesPerFrame)
                 {
                     _drawFlushesSuppressed++;
                     return false;

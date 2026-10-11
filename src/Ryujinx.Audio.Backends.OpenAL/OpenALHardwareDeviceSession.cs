@@ -20,10 +20,6 @@ namespace Ryujinx.Audio.Backends.OpenAL
         private ulong _playedSampleCount;
         private float _volume;
 
-        // NEOV2-AUDIO2: jitter buffer state.
-        private ulong _queuedSampleCount;
-        private long _stallStartTimestamp = -1;
-
         private readonly Lock _lock = new();
 
         public OpenALHardwareDeviceSession(OpenALHardwareDeviceDriver driver, IVirtualMemoryManager memoryManager, SampleFormat requestedSampleFormat, uint requestedSampleRate, uint requestedChannelCount) : base(memoryManager, requestedSampleFormat, requestedSampleRate, requestedChannelCount)
@@ -54,118 +50,22 @@ namespace Ryujinx.Audio.Backends.OpenAL
 
         public override void PrepareToClose() { }
 
-        /// <summary>
-        /// NEOV2-AUDIO2: starts (or restarts after an underrun) only once enough audio is queued. Starting on the
-        /// first 5 ms buffer left the source with less audio than one OpenAL mixing period, so it ran dry on
-        /// every period: gaps, clicks and stutter.
-        /// </summary>
-        private void TryStartPlayback()
-        {
-            if (!_isActive || _queuedBuffers.Count == 0)
-            {
-                _stallStartTimestamp = -1;
-
-                return;
-            }
-
-            AL.GetSource(_sourceId, ALGetSourcei.SourceState, out int stateInt);
-
-            if ((ALSourceState)stateInt == ALSourceState.Playing)
-            {
-                _stallStartTimestamp = -1;
-
-                return;
-            }
-
-            long now = Stopwatch.GetTimestamp();
-
-            if (_stallStartTimestamp < 0)
-            {
-                _stallStartTimestamp = now;
-            }
-
-            ulong threshold = (ulong)RequestedSampleRate * (ulong)Math.Max(0, OpenALHardwareDeviceDriver.PrerollMilliseconds) / 1000;
-            bool timedOut = (now - _stallStartTimestamp) * 1000 >= (long)Math.Max(0, OpenALHardwareDeviceDriver.PrerollTimeoutMilliseconds) * Stopwatch.Frequency;
-
-            if (_queuedSampleCount < threshold && !timedOut)
-            {
-                return;
-            }
-
-            // A stopped source must be rewound first, or its new buffers count as already played.
-            RecoverStoppedSource();
-
-            if (_queuedBuffers.Count == 0)
-            {
-                return;
-            }
-
-            AL.SourcePlay(_sourceId);
-            _stallStartTimestamp = -1;
-
-        }
-
-        /// <summary>
-        /// NEOV2-AUDIO3: while a source is STOPPED (after an underrun or Stop), OpenAL Soft reports every queued
-        /// buffer as processed, including buffers queued after the stop. Releasing them threw away audio that was
-        /// never played, so after the first underrun nothing was ever played again (no sound). Release what is
-        /// in the queue now (it played before the stop) and rewind to INITIAL, where new buffers count as pending.
-        /// </summary>
-        private int RecoverStoppedSource()
+        private void StartIfNotPlaying()
         {
             AL.GetSource(_sourceId, ALGetSourcei.SourceState, out int stateInt);
 
-            if ((ALSourceState)stateInt != ALSourceState.Stopped)
+            ALSourceState State = (ALSourceState)stateInt;
+
+            if (State != ALSourceState.Playing)
             {
-                return 0;
+                AL.SourcePlay(_sourceId);
             }
-
-            int released = ReleaseProcessedBuffers();
-
-            AL.SourceRewind(_sourceId);
-
-            return released;
-        }
-
-        private int ReleaseProcessedBuffers()
-        {
-            AL.GetSource(_sourceId, ALGetSourcei.BuffersProcessed, out int releasedCount);
-
-            if (releasedCount <= 0)
-            {
-                return 0;
-            }
-
-            int[] bufferIds = new int[releasedCount];
-
-            AL.SourceUnqueueBuffers(_sourceId, releasedCount, bufferIds);
-
-            int i = 0;
-
-            while (i < bufferIds.Length && _queuedBuffers.TryPeek(out OpenALAudioBuffer buffer) && buffer.BufferId == bufferIds[i])
-            {
-                _playedSampleCount += buffer.SampleCount;
-                _queuedSampleCount -= Math.Min(_queuedSampleCount, buffer.SampleCount);
-
-                _queuedBuffers.TryDequeue(out _);
-
-                i++;
-            }
-
-            Debug.Assert(i == bufferIds.Length, "Unknown buffer ids found!");
-
-            AL.DeleteBuffers(bufferIds);
-
-            return releasedCount;
         }
 
         public override void QueueBuffer(AudioBuffer buffer)
         {
             lock (_lock)
             {
-                // NEOV2-AUDIO3: never append to a STOPPED source; the new buffer would be reported as played.
-                RecoverStoppedSource();
-
                 OpenALAudioBuffer driverBuffer = new()
                 {
                     DriverIdentifier = buffer.DataPointer,
@@ -176,13 +76,12 @@ namespace Ryujinx.Audio.Backends.OpenAL
                 AL.BufferData(driverBuffer.BufferId, _targetFormat, buffer.Data, (int)RequestedSampleRate);
 
                 _queuedBuffers.Enqueue(driverBuffer);
-                _queuedSampleCount += driverBuffer.SampleCount;
 
                 AL.SourceQueueBuffer(_sourceId, driverBuffer.BufferId);
 
                 if (_isActive)
                 {
-                    TryStartPlayback();
+                    StartIfNotPlaying();
                 }
             }
         }
@@ -213,7 +112,7 @@ namespace Ryujinx.Audio.Backends.OpenAL
             {
                 _isActive = true;
 
-                TryStartPlayback();
+                StartIfNotPlaying();
             }
         }
 
@@ -226,7 +125,6 @@ namespace Ryujinx.Audio.Backends.OpenAL
                 AL.SourceStop(_sourceId);
 
                 _isActive = false;
-                _stallStartTimestamp = -1;
             }
         }
 
@@ -259,11 +157,32 @@ namespace Ryujinx.Audio.Backends.OpenAL
             {
                 if (_isActive)
                 {
-                    int releasedCount = RecoverStoppedSource();
+                    AL.GetSource(_sourceId, ALGetSourcei.BuffersProcessed, out int releasedCount);
 
-                    releasedCount += ReleaseProcessedBuffers();
+                    if (releasedCount > 0)
+                    {
+                        int[] bufferIds = new int[releasedCount];
 
-                    TryStartPlayback();
+                        AL.SourceUnqueueBuffers(_sourceId, releasedCount, bufferIds);
+
+                        int i = 0;
+
+                        while (_queuedBuffers.TryPeek(out OpenALAudioBuffer buffer) && i < bufferIds.Length)
+                        {
+                            if (buffer.BufferId == bufferIds[i])
+                            {
+                                _playedSampleCount += buffer.SampleCount;
+
+                                _queuedBuffers.TryDequeue(out _);
+
+                                i++;
+                            }
+                        }
+
+                        Debug.Assert(i == bufferIds.Length, "Unknown buffer ids found!");
+
+                        AL.DeleteBuffers(bufferIds);
+                    }
 
                     return releasedCount > 0;
                 }

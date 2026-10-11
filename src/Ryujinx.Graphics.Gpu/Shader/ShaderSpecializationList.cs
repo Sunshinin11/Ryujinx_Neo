@@ -31,17 +31,10 @@ namespace Ryujinx.Graphics.Gpu.Shader
             GpuChannel channel,
             ref GpuChannelPoolState poolState,
             ref GpuChannelGraphicsState graphicsState,
-            out CachedShaderProgram program,
-            bool requireVertexAndGeometryAsCompute = false)
+            out CachedShaderProgram program)
         {
             foreach (CachedShaderProgram entry in _entries)
             {
-                if (requireVertexAndGeometryAsCompute &&
-                    (entry.VertexAsCompute == null || entry.GeometryAsCompute == null))
-                {
-                    continue;
-                }
-
                 bool vertexAsCompute = entry.VertexAsCompute != null;
                 bool usesDrawParameters = entry.Shaders[1]?.Info.UsesDrawParameters ?? false;
 

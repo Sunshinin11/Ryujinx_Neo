@@ -355,15 +355,6 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
-        /// NEOV2-GMEMFB1: queries whether global memory accesses that cannot be traced to a storage buffer should
-        /// select one of the NVN driver storage buffers at runtime (Eden behavior) instead of reading zero.
-        /// </summary>
-        bool QueryGlobalMemoryFallbackEnabled()
-        {
-            return false;
-        }
-
-        /// <summary>
         /// Queries host GPU support for signed normalized buffer texture formats.
         /// </summary>
         /// <returns>True if the GPU and driver supports the formats, false otherwise</returns>

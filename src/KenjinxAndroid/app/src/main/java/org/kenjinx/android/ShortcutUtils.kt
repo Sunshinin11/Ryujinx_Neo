@@ -32,6 +32,7 @@ object ShortcutUtils {
         val rw = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
         try { activity.contentResolver.takePersistableUriPermission(uri, rw) } catch (_: Exception) {}
         try { activity.grantUriPermission(activity.packageName, uri, rw) } catch (_: Exception) {}
+        try { activity.grantUriPermission("org.kenjinx.android", uri, rw) } catch (_: Exception) {}
     }
 
     /**

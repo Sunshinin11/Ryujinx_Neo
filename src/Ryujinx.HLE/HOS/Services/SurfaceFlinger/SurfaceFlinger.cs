@@ -41,16 +41,11 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
 
         public long RenderLayerId { get; private set; }
 
-        // NEOV2-COSMIC5: camadas de gravacao criadas por CreateManagedDisplaySeparableLayer (AM cmd 44).
-        // O jogo desenha na camada de exibicao; a de gravacao nunca deve virar a camada mostrada
-        // (senao a tela fica preta, como no MARVEL Cosmic Invasion). O Eden nem cria essa camada
-        // (display_layer_manager.cpp devolve 0 como recording layer).
-        // ConcurrentDictionary: lido no callback BufferQueued sem pegar _lock (evita inversao de travas).
         private readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> _neoRecordingLayers = new();
 
         public void MarkRecordingLayer(long layerId)
         {
-            if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled) _neoRecordingLayers[layerId] = 0;
+            _neoRecordingLayers[layerId] = 0;
         }
 
         private class Layer
@@ -264,7 +259,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
                 }
                 else
                 {
-                    // NEOV2-COSMIC5: prefere a ultima camada que nao seja de gravacao.
+                    // NEOV2-COSMIC5: prefere a ultima camada que não seja de gravação.
                     long next = _layers.Last().Key;
 
                     if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled)
@@ -294,8 +289,8 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
         {
             lock (_lock)
             {
-                // NEOV2-COSMIC5: a camada de gravacao nunca vira a camada exibida.
-                bool isRecording = Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled && _neoRecordingLayers.ContainsKey(layerId);
+                bool isRecording =
+                    _neoRecordingLayers.ContainsKey(layerId);
 
                 if (isRecording)
                 {

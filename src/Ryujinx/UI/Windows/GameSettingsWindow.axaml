@@ -1,0 +1,279 @@
+<window:StyleableWindow
+    x:Class="Ryujinx.Ava.UI.Windows.GameSettingsWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:window="clr-namespace:Ryujinx.Ava.UI.Windows"
+    Width="760"
+    Height="720"
+    MinWidth="620"
+    MinHeight="560"
+    WindowStartupLocation="CenterOwner"
+    Focusable="True">
+
+    <Grid
+        Margin="22"
+        RowDefinitions="Auto,Auto,*,Auto">
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Spacing="4">
+            <TextBlock
+                x:Name="GameNameText"
+                FontSize="22"
+                FontWeight="Bold"
+                Text="Configurações do jogo" />
+
+            <TextBlock
+                x:Name="TitleIdText"
+                Opacity="0.65"
+                FontSize="12" />
+        </StackPanel>
+
+        <!-- Profile toggle -->
+        <Border
+            Grid.Row="1"
+            Margin="0,18,0,12"
+            Padding="14"
+            BorderBrush="#606060"
+            BorderThickness="1"
+            CornerRadius="8">
+
+            <CheckBox
+                x:Name="EnabledCheckBox"
+                Click="Enabled_Click"
+                Content="Usar configurações personalizadas para este jogo"
+                ToolTip.Tip="Ativa este perfil. Quando desmarcado, o jogo usa as configurações globais do emulador." />
+        </Border>
+
+        <!-- Settings -->
+        <ScrollViewer Grid.Row="2">
+            <StackPanel
+                x:Name="SettingsPanel"
+                Spacing="18">
+
+                <!-- CPU -->
+                <StackPanel Spacing="8">
+                    <TextBlock
+                        FontSize="16"
+                        FontWeight="SemiBold"
+                        Text="Emulação e CPU" />
+
+                    <CheckBox
+                        x:Name="UseNceCheckBox"
+                        Content="Execução nativa NCE"
+                        ToolTip.Tip="Executa o código ARM64 do jogo diretamente no processador. Normalmente oferece mais desempenho, mas alguns jogos podem precisar do JIT por compatibilidade." />
+
+                    <CheckBox
+                        x:Name="NceProtectionRestoreCheckBox"
+                        Content="NCE Memory Protection (PROT1)"
+                        ToolTip.Tip="Restaura o tracking de proteção de memória após mudanças de permissão do guest. Ative somente para jogos que precisam deste workaround." />
+
+                    <CheckBox
+                        x:Name="EnablePtcCheckBox"
+                        Content="PPTC"
+                        ToolTip.Tip="Salva traduções de código em disco para reduzir recompilações e acelerar as próximas inicializações. Desative apenas para diagnosticar cache incompatível." />
+
+                    <CheckBox
+                        x:Name="MemorySlackCheckBox"
+                        Content="Memory Slack (12 GiB)"
+                        ToolTip.Tip="Reserva um espaço de endereçamento maior para jogos que exigem mapas de memória extensos, como Tears of the Kingdom. Pode aumentar o consumo de memória virtual." />
+                </StackPanel>
+
+                <Separator />
+
+                <!-- System -->
+                <StackPanel Spacing="8">
+                    <TextBlock
+                        FontSize="16"
+                        FontWeight="SemiBold"
+                        Text="Sistema" />
+
+                    <CheckBox
+                        x:Name="DockedCheckBox"
+                        Content="Modo Docked"
+                        ToolTip.Tip="Emula o Switch no dock, permitindo perfis de resolução e desempenho mais altos do jogo. Geralmente exige mais da GPU." />
+
+                    <Grid
+                        ColumnDefinitions="220,*"
+                        ToolTip.Tip="Controla a sincronização e o limitador de velocidade do jogo. O modo Switch preserva o comportamento esperado do console.">
+                        <TextBlock
+                            Grid.Column="0"
+                            VerticalAlignment="Center"
+                            Text="VSync" />
+
+                        <ComboBox
+                            x:Name="VSyncComboBox"
+                            Grid.Column="1"
+                            MinWidth="220" />
+                    </Grid>
+                </StackPanel>
+
+                <Separator />
+
+                <!-- Graphics -->
+                <StackPanel Spacing="10">
+                    <TextBlock
+                        FontSize="16"
+                        FontWeight="SemiBold"
+                        Text="Gráficos" />
+
+                    <Grid
+                        ColumnDefinitions="220,*"
+                        ToolTip.Tip="Multiplica a resolução interna renderizada pelo jogo. Valores maiores melhoram a nitidez, mas aumentam bastante o uso da GPU.">
+                        <TextBlock
+                            Grid.Column="0"
+                            VerticalAlignment="Center"
+                            Text="Escala de resolução" />
+
+                        <ComboBox
+                            x:Name="ResolutionScaleComboBox"
+                            Grid.Column="1"
+                            MinWidth="220" />
+                    </Grid>
+
+                    <Grid
+                        ColumnDefinitions="220,*"
+                        ToolTip.Tip="Melhora a nitidez de texturas vistas em ângulo. Auto usa a escolha do jogo; 16x costuma ter baixo custo em GPUs modernas.">
+                        <TextBlock
+                            Grid.Column="0"
+                            VerticalAlignment="Center"
+                            Text="Filtro anisotrópico" />
+
+                        <ComboBox
+                            x:Name="AnisotropyComboBox"
+                            Grid.Column="1"
+                            MinWidth="220" />
+                    </Grid>
+
+                    <CheckBox
+                        x:Name="ShaderCacheCheckBox"
+                        Content="Cache de shaders"
+                        ToolTip.Tip="Guarda shaders compilados para reduzir engasgos em execuções futuras. É recomendado manter ativado." />
+
+                    <CheckBox
+                        x:Name="ShaderLoopSafetyCheckBox"
+                        Content="Shader Loop Safety"
+                        ToolTip.Tip="Adiciona proteção contra loops infinitos em shaders problemáticos. Pode evitar travamentos, com possível custo de desempenho e cache separado." />
+
+                    <CheckBox
+                        x:Name="TextureRecompressionCheckBox"
+                        Content="Recompressão de texturas"
+                        ToolTip.Tip="Recomprime formatos de textura para reduzir uso de memória de vídeo. Pode ajudar em jogos pesados, ao custo de processamento e possível perda mínima de qualidade." />
+
+                    <CheckBox
+                        x:Name="MacroHleCheckBox"
+                        Content="Macro HLE"
+                        ToolTip.Tip="Substitui macros conhecidas da GPU por implementações otimizadas no host. Normalmente melhora o desempenho; desative somente por compatibilidade." />
+
+                    <Separator Margin="0,6,0,6" />
+
+                    <TextBlock
+                        FontSize="14"
+                        FontWeight="SemiBold"
+                        Text="NEOV2 / Compatibilidade" />
+
+                    <CheckBox
+                        x:Name="GpuOptimizationsCheckBox"
+                        Content="Otimizações GPU"
+                        ToolTip.Tip="Ativa otimizações adicionais do backend gráfico Neo. Recomendado; desative apenas para comparar ou investigar defeitos gráficos." />
+
+                    <CheckBox
+                        x:Name="RelaxedDmaCheckBox"
+                        Content="DMA relaxado"
+                        ToolTip.Tip="Reduz verificações conservadoras em cópias DMA para melhorar o desempenho. Pode causar corrupção em jogos que dependem de sincronização estrita." />
+
+                    <CheckBox
+                        x:Name="VtgComputeCheckBox"
+                        Content="VTG via Compute"
+                        ToolTip.Tip="Converte estágios Vertex/Tessellation/Geometry para compute quando necessário. Melhora compatibilidade e desempenho em drivers que lidam mal com esses estágios." />
+
+                    <CheckBox
+                        x:Name="RejectUnmappedCheckBox"
+                        Content="Rejeitar descritores de textura não mapeados"
+                        ToolTip.Tip="Ignora descritores que apontam para memória não mapeada em vez de tentar usá-los. Pode evitar crashes e artefatos em jogos específicos." />
+
+                    <CheckBox
+                        x:Name="AsyncLarge3DCheckBox"
+                        Content="Upload assíncrono de texturas 3D grandes"
+                        ToolTip.Tip="Transfere texturas 3D grandes em segundo plano para reduzir pausas na renderização. Não é compilação assíncrona de shaders." />
+
+                    <CheckBox
+                        x:Name="Experimental2DCheckBox"
+                        Content="Compatibilidade gráfica 2D"
+                        ToolTip.Tip="Ativa um conjunto experimental de correções para cópias 2D, buffers e layouts de textura. Use somente em jogos que apresentem imagem incorreta ou falhas conhecidas." />
+
+                    <CheckBox
+                        x:Name="NifmOfflineCheckBox"
+                        Content="NIFM Offline"
+                        ToolTip.Tip="Informa ao jogo que serviços de rede estão indisponíveis. Útil quando verificações online bloqueiam ou atrasam a inicialização." />
+
+                    <Grid
+                        ColumnDefinitions="220,*"
+                        ToolTip.Tip="Ajusta a frequência de flush automático dos comandos de desenho. Reduced pode reduzir overhead; Disabled é mais agressivo e pode causar problemas gráficos.">
+                        <TextBlock
+                            Grid.Column="0"
+                            VerticalAlignment="Center"
+                            Text="Draw Flush" />
+                        <ComboBox
+                            x:Name="DrawFlushComboBox"
+                            Grid.Column="1"
+                            MinWidth="220" />
+                    </Grid>
+
+                    <Grid
+                        ColumnDefinitions="220,*"
+                        ToolTip.Tip="Controla quão conservadora é a leitura de buffers modificados pela GPU. Relaxed reduz sincronizações, mas pode retornar dados desatualizados em jogos incompatíveis.">
+                        <TextBlock
+                            Grid.Column="0"
+                            VerticalAlignment="Center"
+                            Text="Buffer Readback" />
+                        <ComboBox
+                            x:Name="BufferReadbackComboBox"
+                            Grid.Column="1"
+                            MinWidth="220" />
+                    </Grid>
+
+                    <Grid
+                        ColumnDefinitions="220,*"
+                        ToolTip.Tip="Controla quando sincronizações GPU são aguardadas. Modos mais imediatos favorecem correção; modos relaxados podem melhorar desempenho com risco de timing incorreto.">
+                        <TextBlock
+                            Grid.Column="0"
+                            VerticalAlignment="Center"
+                            Text="Strict Sync" />
+                        <ComboBox
+                            x:Name="StrictSyncComboBox"
+                            Grid.Column="1"
+                            MinWidth="220" />
+                    </Grid>
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Buttons -->
+        <Grid
+            Grid.Row="3"
+            Margin="0,20,0,0"
+            ColumnDefinitions="Auto,*,Auto,Auto">
+
+            <Button
+                Grid.Column="0"
+                MinWidth="130"
+                Margin="0,0,8,0"
+                Click="Reset_Click"
+                Content="Restaurar global" />
+
+            <Button
+                Grid.Column="2"
+                MinWidth="90"
+                Margin="8,0,0,0"
+                Click="Cancel_Click"
+                Content="Cancelar" />
+
+            <Button
+                Grid.Column="3"
+                MinWidth="90"
+                Margin="8,0,0,0"
+                Click="Save_Click"
+                Content="Salvar" />
+        </Grid>
+    </Grid>
+</window:StyleableWindow>

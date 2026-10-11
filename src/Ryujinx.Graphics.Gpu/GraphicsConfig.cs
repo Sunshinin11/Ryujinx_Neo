@@ -51,7 +51,17 @@ namespace Ryujinx.Graphics.Gpu
         /// Title id of the current running game.
         /// Used by the shader cache.
         /// </summary>
-        public static string TitleId;
+        private static string _titleId;
+
+        public static string TitleId
+        {
+            get => _titleId;
+            set
+            {
+                _titleId = value;
+                Ryujinx.Graphics.GAL.GraphicsCompatibility.TitleId = value;
+            }
+        }
 
         /// <summary>
         /// Enables or disables the shader cache.
@@ -81,26 +91,14 @@ namespace Ryujinx.Graphics.Gpu
         public static bool EnableColorSpacePassthrough = false;
 
         /// <summary>
-        /// Executes vertex and geometry pipelines via Compute shaders when shaders require
-        /// semantics not properly preserved by native geometry stages.
+        /// Executes vertex and geometry pipelines via Compute when required.
         /// </summary>
         public static bool EnableVtgViaCompute = true;
-
         /// <summary>
-        /// NEOV2 DMA-RELAX1: "Copia DMA relaxada". When enabled, DMA buffer copies whose source data is
-        /// already in guest memory stay on the GPU (the destination buffer is marked as GPU modified) instead of
-        /// also writing the destination on the CPU, which forces textures overlapping it to be downloaded from the
-        /// GPU first. Same trade-off Eden makes in BufferCache::DMACopy. Off by default; can cause stale data in
-        /// textures overlapping the copy destination.
+        /// NEOV2 DMA-RELAX1: mantém DMA copies no lado GPU quando habilitado.
+        /// Desligado por padrão pois pode expor dados stale em texturas sobrepostas.
         /// </summary>
         public static bool RelaxedDmaCopy;
-
-        /// <summary>
-        /// NEOV2-GPUMEM1: "Memoria de GPU estilo Eden". When enabled, the buffer and texture caches free unused
-        /// resources based on the real device memory usage, with the same thresholds Eden uses on integrated GPUs
-        /// (collect from 1.6 GiB, aggressive from 3.2 GiB), and Android low RAM forces aggressive collection.
-        /// </summary>
-        public static bool EdenGpuMemory;
 
         /// <summary>
         /// Rejects texture descriptors pointing to unmapped guest memory.
@@ -113,6 +111,7 @@ namespace Ryujinx.Graphics.Gpu
         /// ON by default.
         /// </summary>
         public static bool AsyncLarge3DTextureUpload = true;
+
     }
 #pragma warning restore CA2211
 }

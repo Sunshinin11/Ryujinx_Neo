@@ -61,6 +61,46 @@ namespace Ryujinx.Graphics.Vulkan
         private AccessFlags _lastReadAccess;
         private PipelineStageFlags _lastReadStage;
 
+        // TOTK-WRITE-GENERATION1
+        // Diagnostic only. Incremented whenever this storage completes
+        // a render pass as a color/depth attachment.
+        private long _totkWriteGeneration;
+        public long TotkWriteGeneration => System.Threading.Interlocked.Read(ref _totkWriteGeneration);
+
+        // TOTK-C827-DEPTH-PRODUCER12
+        // Guarda os ultimos draws que usaram ESTA storage como depth attachment.
+        private readonly object _totkDepthDrawHistoryLock = new();
+        private readonly Queue<string> _totkDepthDrawHistory = new();
+
+        public void TotkRecordDepthDraw(
+            string hash,
+            ulong draw,
+            bool passWritesDepthStencil,
+            string viewInfo)
+        {
+            lock (_totkDepthDrawHistoryLock)
+            {
+                while (_totkDepthDrawHistory.Count >= 128)
+                {
+                    _totkDepthDrawHistory.Dequeue();
+                }
+
+                _totkDepthDrawHistory.Enqueue(
+                    $"HASH={hash ?? "<none>"} " +
+                    $"DRAW={draw} " +
+                    $"DEPTHWRITE={passWritesDepthStencil} " +
+                    $"VIEW={viewInfo}");
+            }
+        }
+
+        public string[] TotkGetDepthDrawHistory()
+        {
+            lock (_totkDepthDrawHistoryLock)
+            {
+                return _totkDepthDrawHistory.ToArray();
+            }
+        }
+
         private int _viewsCount;
         private readonly ulong _size;
 
@@ -152,7 +192,7 @@ namespace Ryujinx.Graphics.Vulkan
             VkFormat* viewFormats = stackalloc VkFormat[MaxTurnipViewFormats];
             ImageFormatListCreateInfo formatList = default;
 
-            if (gd.IsTurnip && foreignAllocation == null)
+            if (gd.IsTurnip && foreignAllocation == null && !VulkanRenderer.TotkMismatchViewsE20)
             {
                 int viewFormatCount = BuildTurnipViewFormatList(gd, info, format, isMsImageStorageSupported, viewFormats);
 
@@ -175,12 +215,16 @@ namespace Ryujinx.Graphics.Vulkan
                     imageCreateInfo.PNext = &formatList;
                 }
             }
+            long neoS0 = System.Diagnostics.Stopwatch.GetTimestamp();
             gd.Api.CreateImage(device, in imageCreateInfo, null, out _image).ThrowOnError();
+            if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddStep(0, neoS0);
 
             if (foreignAllocation == null)
             {
                 gd.Api.GetImageMemoryRequirements(device, _image, out MemoryRequirements requirements);
+                long neoS1 = System.Diagnostics.Stopwatch.GetTimestamp();
                 MemoryAllocation allocation = gd.MemoryAllocator.AllocateDeviceMemory(requirements, DefaultImageMemoryFlags);
+                if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddStep(1, neoS1);
 
                 if (allocation.Memory.Handle == 0UL)
                 {
@@ -190,12 +234,16 @@ namespace Ryujinx.Graphics.Vulkan
 
                 _size = requirements.Size;
 
+                long neoS2 = System.Diagnostics.Stopwatch.GetTimestamp();
                 gd.Api.BindImageMemory(device, _image, allocation.Memory, allocation.Offset).ThrowOnError();
+                if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddStep(2, neoS2);
 
                 _allocationAuto = new Auto<MemoryAllocation>(allocation);
                 _imageAuto = new Auto<DisposableImage>(new DisposableImage(_gd.Api, device, _image), null, _allocationAuto);
 
+                long neoS3 = System.Diagnostics.Stopwatch.GetTimestamp();
                 InitialTransition(ImageLayout.Undefined, ImageLayout.General);
+                if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddStep(3, neoS3);
 
                 _telemetryTracked = GezinjinxPerformanceMode.DetailedTelemetry;
                 TextureFormatTelemetry.RecordStorageCreated((long)_size);
@@ -245,6 +293,21 @@ namespace Ryujinx.Graphics.Vulkan
 
             int count = 0;
             list[count++] = format;
+
+            // sRGB/UNORM counterpart (same UBWC class): lets the GPU layer create a real view instead of a copy.
+            Format srgbPair = info.Format switch
+            {
+                Format.R8G8B8A8Unorm => Format.R8G8B8A8Srgb,
+                Format.R8G8B8A8Srgb => Format.R8G8B8A8Unorm,
+                Format.B8G8R8A8Unorm => Format.B8G8R8A8Srgb,
+                Format.B8G8R8A8Srgb => Format.B8G8R8A8Unorm,
+                _ => info.Format,
+            };
+
+            if (srgbPair != info.Format)
+            {
+                AddViewFormat(gd, srgbPair, isMsImageStorageSupported, list, ref count);
+            }
 
             switch (info.BytesPerPixel)
             {
@@ -753,9 +816,10 @@ namespace Ryujinx.Graphics.Vulkan
                 MarkRenderTargetTelemetry();
             }
 
-            _lastModificationStage = depthStencil ?
-                PipelineStageFlags.LateFragmentTestsBit :
-                PipelineStageFlags.ColorAttachmentOutputBit;
+            // TOTK-WRITE-GENERATION1
+            System.Threading.Interlocked.Increment(ref _totkWriteGeneration);
+
+            _lastModificationStage = GetTotkAttachmentWriteStage(depthStencil);
 
             _lastModificationAccess = depthStencil ?
                 AccessFlags.DepthStencilAttachmentWriteBit :
@@ -793,13 +857,61 @@ namespace Ryujinx.Graphics.Vulkan
                 _lastReadAccess = AccessFlags.None;
             }
 
-            _lastModificationStage = depthStencil ?
-                PipelineStageFlags.LateFragmentTestsBit :
-                PipelineStageFlags.ColorAttachmentOutputBit;
+            _lastModificationStage = GetTotkAttachmentWriteStage(depthStencil);
 
             _lastModificationAccess = depthStencil ?
                 AccessFlags.DepthStencilAttachmentWriteBit :
                 AccessFlags.ColorAttachmentWriteBit;
+        }
+
+        // TOTK-DEPTH-EARLYLATE17
+        // Diagnostic A/B: depth/stencil attachment writes may execute in
+        // EarlyFragmentTests or LateFragmentTests. Preserve the original
+        // behavior unless explicitly enabled by the debug launcher.
+        private static readonly bool _totkDepthEarlyLate17 =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_DEPTH_EARLY_LATE") == "1";
+
+        private static PipelineStageFlags GetTotkAttachmentWriteStage(bool depthStencil)
+        {
+            if (!depthStencil)
+            {
+                return PipelineStageFlags.ColorAttachmentOutputBit;
+            }
+
+            return _totkDepthEarlyLate17
+                ? PipelineStageFlags.EarlyFragmentTestsBit |
+                  PipelineStageFlags.LateFragmentTestsBit
+                : PipelineStageFlags.LateFragmentTestsBit;
+        }
+
+        // TOTK-C827-BARRIER-TRACE18
+        private static readonly bool _totkC827BarrierTrace18 =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_C827_BARRIER_TRACE") == "1";
+
+        private ulong _totkBarrierQueuedCount18;
+        private AccessFlags _totkLastBarrierSrcAccess18;
+        private AccessFlags _totkLastBarrierDstAccess18;
+        private PipelineStageFlags _totkLastBarrierSrcStage18;
+        private PipelineStageFlags _totkLastBarrierDstStage18;
+
+        public string TotkGetBarrierDebugSignature18()
+        {
+            return
+                $"MODA={_lastModificationAccess};" +
+                $"MODS={_lastModificationStage};" +
+                $"READA={_lastReadAccess};" +
+                $"READS={_lastReadStage};" +
+                $"LASTSA={_totkLastBarrierSrcAccess18};" +
+                $"LASTSS={_totkLastBarrierSrcStage18};" +
+                $"LASTDA={_totkLastBarrierDstAccess18};" +
+                $"LASTDS={_totkLastBarrierDstStage18}";
+        }
+
+        public string TotkGetBarrierDebugState18()
+        {
+            return
+                TotkGetBarrierDebugSignature18() +
+                $";QUEUED={_totkBarrierQueuedCount18}";
         }
 
         public void QueueWriteToReadBarrier(CommandBufferScoped cbs, AccessFlags dstAccessFlags, PipelineStageFlags dstStageFlags)
@@ -809,6 +921,14 @@ namespace Ryujinx.Graphics.Vulkan
 
             if (_lastModificationAccess != AccessFlags.None)
             {
+                if (_totkC827BarrierTrace18)
+                {
+                    _totkBarrierQueuedCount18++;
+                    _totkLastBarrierSrcAccess18 = _lastModificationAccess;
+                    _totkLastBarrierDstAccess18 = dstAccessFlags;
+                    _totkLastBarrierSrcStage18 = _lastModificationStage;
+                    _totkLastBarrierDstStage18 = dstStageFlags;
+                }
                 ImageAspectFlags aspectFlags = Info.Format.ConvertAspectFlags();
                 ImageMemoryBarrier barrier = TextureView.GetImageBarrier(
                     _imageAuto.Get(cbs).Value,

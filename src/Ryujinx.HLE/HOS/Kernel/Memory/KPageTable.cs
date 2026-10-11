@@ -1,5 +1,4 @@
 using Ryujinx.Horizon.Common;
-using Ryujinx.Cpu.Nce;
 using Ryujinx.Memory;
 using Ryujinx.Memory.Range;
 using System;
@@ -14,9 +13,6 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
         private readonly IVirtualMemoryManager _cpuMemory;
 
         protected override bool UsesPrivateAllocations => _cpuMemory.UsesPrivateAllocations;
-
-        // NEOV2 NCE-PHYSWIN1: only the native (NCE) memory manager maps one host view per guest Map.
-        protected override bool UsePhysicalWindows => NcePhysicalWindowsEnabled && _cpuMemory is MemoryManagerNative;
 
         public KPageTable(KernelContext context, IVirtualMemoryManager cpuMemory, ulong reservedAddressSpaceSize) : base(context, reservedAddressSpaceSize)
         {
@@ -159,8 +155,6 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
                 Context.CommitMemory(addr, size);
 
                 _cpuMemory.Map(currentVa, addr, size, flags);
-                if (_cpuMemory is MemoryManagerNative { HasGuestPermissionComposition: true } native)
-                    native.SetMappedPermission(currentVa, size, permission.Convert());
 
                 if (shouldFillPages)
                 {

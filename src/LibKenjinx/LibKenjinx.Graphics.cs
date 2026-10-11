@@ -1,8 +1,6 @@
 using LibKenjinx.Android;
 using Ryujinx.Common;
 using Ryujinx.Common.Configuration;
-using Ryujinx.Common.Diagnostics;
-using Ryujinx.Common.Logging;
 using Ryujinx.Cpu;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.GAL.Multithreading;
@@ -44,78 +42,7 @@ namespace LibKenjinx
             GraphicsConfig.EnableMacroJit = graphicsConfiguration.EnableMacroJit;
             GraphicsConfig.EnableMacroHLE = graphicsConfiguration.EnableMacroHLE;
             GraphicsConfig.EnableShaderCache = graphicsConfiguration.EnableShaderCache;
-            GraphicsConfig.EnableShaderLoopSafety = graphicsConfiguration.EnableShaderLoopSafety;
             GraphicsConfig.EnableTextureRecompression = graphicsConfiguration.EnableTextureRecompression;
-            GraphicsConfig.EnableVtgViaCompute = graphicsConfiguration.EnableVtgViaCompute;
-
-            // NEOV2 AUTOFLUSH1: modo do Fast Draw Flush ja resolvido (global + override por jogo) na camada Android.
-            DrawFlushMode drawFlushMode = graphicsConfiguration.DrawFlushMode switch
-            {
-                1 => DrawFlushMode.Reduced,
-                2 => DrawFlushMode.Disabled,
-                _ => DrawFlushMode.Default,
-            };
-
-            DrawFlushMode drawFlushGlobalMode = graphicsConfiguration.DrawFlushGlobalMode switch
-            {
-                1 => DrawFlushMode.Reduced,
-                2 => DrawFlushMode.Disabled,
-                _ => DrawFlushMode.Default,
-            };
-
-            NeoGraphicsSettings.DrawFlushMode = drawFlushMode;
-            NeoGraphicsSettings.DrawFlushGlobalMode = drawFlushGlobalMode;
-            NeoGraphicsSettings.DrawFlushGameOverride = graphicsConfiguration.DrawFlushGameOverride < 0
-                ? null
-                : drawFlushMode;
-
-            Logger.Info?.Print(
-                Ryujinx.Common.Logging.LogClass.Gpu,
-                $"[NEOV2-DRAW-FLUSH] global={drawFlushGlobalMode} gameOverride={(graphicsConfiguration.DrawFlushGameOverride < 0 ? "Global" : drawFlushMode.ToString())} effective={drawFlushMode}");
-
-            // NEOV2 BUFFER-READBACK1: modo de leitura de buffer ja resolvido (global + override por jogo).
-            BufferReadbackMode bufferReadbackMode = graphicsConfiguration.BufferReadbackMode == 1
-                ? BufferReadbackMode.Relaxed
-                : BufferReadbackMode.Default;
-
-            BufferReadbackMode bufferReadbackGlobalMode = graphicsConfiguration.BufferReadbackGlobalMode == 1
-                ? BufferReadbackMode.Relaxed
-                : BufferReadbackMode.Default;
-
-            NeoGraphicsSettings.BufferReadbackMode = bufferReadbackMode;
-            NeoGraphicsSettings.BufferReadbackGlobalMode = bufferReadbackGlobalMode;
-            NeoGraphicsSettings.BufferReadbackGameOverride = graphicsConfiguration.BufferReadbackGameOverride < 0
-                ? null
-                : bufferReadbackMode;
-
-            Logger.Info?.Print(
-                Ryujinx.Common.Logging.LogClass.Gpu,
-                $"[NEOV2-BUFFER-READBACK] global={bufferReadbackGlobalMode} gameOverride={(graphicsConfiguration.BufferReadbackGameOverride < 0 ? "Global" : bufferReadbackMode.ToString())} effective={bufferReadbackMode}");
-
-            // NEOV2 STRICT-SYNC1: modo de sincronizacao estrita ja resolvido (global + override por jogo).
-            StrictSyncMode strictSyncMode = graphicsConfiguration.StrictSyncMode == 1
-                ? StrictSyncMode.Immediate
-                : StrictSyncMode.Default;
-
-            StrictSyncMode strictSyncGlobalMode = graphicsConfiguration.StrictSyncGlobalMode == 1
-                ? StrictSyncMode.Immediate
-                : StrictSyncMode.Default;
-
-            NeoGraphicsSettings.StrictSyncMode = strictSyncMode;
-            NeoGraphicsSettings.StrictSyncGlobalMode = strictSyncGlobalMode;
-            NeoGraphicsSettings.StrictSyncGameOverride = graphicsConfiguration.StrictSyncGameOverride < 0
-                ? null
-                : strictSyncMode;
-
-            Logger.Info?.Print(
-                Ryujinx.Common.Logging.LogClass.Gpu,
-                $"[NEOV2-STRICT-SYNC] global={strictSyncGlobalMode} gameOverride={(graphicsConfiguration.StrictSyncGameOverride < 0 ? "Global" : strictSyncMode.ToString())} effective={strictSyncMode}");
-
-            Logger.Info?.Print(
-                Ryujinx.Common.Logging.LogClass.Gpu,
-                graphicsConfiguration.EnableShaderLoopSafety
-                    ? "[NEOV2-LOOP-GUARD] enabled; limit=8192"
-                    : "[NEOV2-LOOP-GUARD] disabled");
 
             GraphicsConfiguration = graphicsConfiguration;
 
@@ -187,9 +114,6 @@ namespace LibKenjinx
             device.Gpu.ShaderCacheStateChanged += LoadProgressStateChangedHandler;
             device.Processes.ActiveApplication.DiskCacheLoadState.StateChanged += LoadProgressStateChangedHandler;
 
-            // NEOV2-GPUMEM1: Android RAM watchdog while the game runs.
-            HostMemoryWatchdog.Start();
-
             try
             {
                 device.Gpu.Renderer.RunLoop(() =>
@@ -242,7 +166,6 @@ namespace LibKenjinx
             }
             finally
             {
-                HostMemoryWatchdog.Stop();
                 device.Gpu.ShaderCacheStateChanged -= LoadProgressStateChangedHandler;
                 device.Processes.ActiveApplication.DiskCacheLoadState.StateChanged -= LoadProgressStateChangedHandler;
             }
@@ -335,28 +258,7 @@ namespace LibKenjinx
         public bool EnableMacroJit;
         public bool EnableMacroHLE;
         public bool EnableShaderCache;
-        public bool EnableShaderLoopSafety;
         public bool EnableTextureRecompression;
-        public bool EnableVtgViaCompute;
-
-        // NEOV2 AUTOFLUSH1: 0 = Padrao, 1 = Reduzido, 2 = Desativado. DrawFlushGameOverride usa -1 para
-        // "usar configuracao global" e serve apenas para o log inicial.
-        public int DrawFlushMode;
-        public int DrawFlushGlobalMode;
-        public int DrawFlushGameOverride;
-
-        // NEOV2 BUFFER-READBACK1: 0 = Padrao, 1 = Relaxada. BufferReadbackGameOverride usa -1 para
-        // "usar configuracao global" e serve apenas para o log inicial.
-        public int BufferReadbackMode;
-        public int BufferReadbackGlobalMode;
-        public int BufferReadbackGameOverride;
-
-        // NEOV2 STRICT-SYNC1: 0 = Padrao (adiado no Turnip), 1 = Imediata. StrictSyncGameOverride usa -1
-        // para "usar configuracao global" e serve apenas para o log inicial.
-        public int StrictSyncMode;
-        public int StrictSyncGlobalMode;
-        public int StrictSyncGameOverride;
-
         public BackendThreading BackendThreading;
         public AspectRatio AspectRatio; // <- important
 
@@ -369,18 +271,7 @@ namespace LibKenjinx
             EnableMacroJit = false;
             EnableMacroHLE = true;
             EnableShaderCache = true;
-            EnableShaderLoopSafety = false;
             EnableTextureRecompression = false;
-            EnableVtgViaCompute = true;
-            DrawFlushMode = 0;
-            DrawFlushGlobalMode = 0;
-            DrawFlushGameOverride = -1;
-            BufferReadbackMode = 0;
-            BufferReadbackGlobalMode = 0;
-            BufferReadbackGameOverride = -1;
-            StrictSyncMode = 0;
-            StrictSyncGlobalMode = 0;
-            StrictSyncGameOverride = -1;
             BackendThreading = BackendThreading.Auto;
             AspectRatio = AspectRatio.Fixed16x9;
         }

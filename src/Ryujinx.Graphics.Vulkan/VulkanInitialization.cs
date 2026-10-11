@@ -49,7 +49,8 @@ namespace Ryujinx.Graphics.Vulkan
             "VK_KHR_maintenance2",
             "VK_EXT_attachment_feedback_loop_layout",
             "VK_EXT_attachment_feedback_loop_dynamic_state",
-            "VK_EXT_memory_priority"
+            "VK_EXT_memory_priority",
+            KhrPipelineExecutableProperties.ExtensionName
         ];
 
         private static readonly string[] _requiredExtensions =
@@ -501,6 +502,17 @@ namespace Ryujinx.Graphics.Vulkan
                 features2.PNext = &supportedDeviceMemoryPriorityFeatures;
             }
 
+            PhysicalDevicePipelineExecutablePropertiesFeaturesKHR supportedPipelineExecutablePropertiesFeatures = new()
+            {
+                SType = StructureType.PhysicalDevicePipelineExecutablePropertiesFeaturesKhr,
+                PNext = features2.PNext,
+            };
+
+            if (physicalDevice.IsDeviceExtensionPresent(KhrPipelineExecutableProperties.ExtensionName))
+            {
+                features2.PNext = &supportedPipelineExecutablePropertiesFeatures;
+            }
+
             PhysicalDeviceVulkan12Features supportedPhysicalDeviceVulkan12Features = new()
             {
                 SType = StructureType.PhysicalDeviceVulkan12Features,
@@ -714,6 +726,20 @@ namespace Ryujinx.Graphics.Vulkan
                 };
 
                 pExtendedFeatures = &featuresDeviceMemoryPriority;
+            }
+
+            PhysicalDevicePipelineExecutablePropertiesFeaturesKHR featuresPipelineExecutableProperties = new()
+            {
+                SType = StructureType.PhysicalDevicePipelineExecutablePropertiesFeaturesKhr,
+            };
+
+            if (physicalDevice.IsDeviceExtensionPresent(KhrPipelineExecutableProperties.ExtensionName) &&
+                supportedPipelineExecutablePropertiesFeatures.PipelineExecutableInfo)
+            {
+                featuresPipelineExecutableProperties.PNext = pExtendedFeatures;
+                featuresPipelineExecutableProperties.PipelineExecutableInfo = true;
+
+                pExtendedFeatures = &featuresPipelineExecutableProperties;
             }
 
             string[] enabledExtensions = _requiredExtensions.Union(_desirableExtensions.Intersect(physicalDevice.DeviceExtensions)).ToArray();

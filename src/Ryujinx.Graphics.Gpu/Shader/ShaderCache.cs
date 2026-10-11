@@ -120,14 +120,32 @@ namespace Ryujinx.Graphics.Gpu.Shader
             // Keep the former guarded cache in its original directory so MUA3 can reuse it.
             // The accuracy-first mode gets a separate cache and cannot accidentally load
             // binaries that already contain the loop counter.
-            // The suffix changes whenever the vertex/geometry to compute policy changes, so binaries
-            // compiled under the previous policy are never reused.
-            string cacheDirectory = GraphicsConfig.EnableShaderLoopSafety ? "shader-vtgp1" : "shader-no-loop-guard-vtgp1";
+            string cacheDirectory = GraphicsConfig.EnableShaderLoopSafety
+                ? "shader-vtgp1"
+                : "shader-no-loop-guard-vtgp1";
 
-            // NEOV2-GMEMFB1: "Memoria de GPU estilo Eden" changes how global memory is translated.
-            if (GraphicsConfig.EdenGpuMemory)
+            // SHADOWTAP-E17: translated code differs when the diagnostic is on; keep it isolated.
+            if (TotkDiagShared.ShadowTapOne)
             {
-                cacheDirectory += "-gmemfb1";
+                cacheDirectory += "-shadowtap-" + TotkDiagShared.ShadowTapTarget + "-" + TotkDiagShared.ShadowTapMode;
+            }
+
+            // FMZ-E4: translated code differs when FMZ emulation is on; keep it isolated.
+            if (System.Environment.GetEnvironmentVariable("RYUJINX_FMZ_EMU") == "1")
+            {
+                cacheDirectory += "-fmz1";
+            }
+
+            // VOTEALL-E9: translated code differs when the diagnostic is on; keep it isolated.
+            if (System.Environment.GetEnvironmentVariable("RYUJINX_VOTEALL_FALSE") == "1")
+            {
+                cacheDirectory += "-voteallfalse1";
+            }
+
+            // UNORM255-E14: translated code differs when the diagnostic is on; keep it isolated.
+            if (System.Environment.GetEnvironmentVariable("RYUJINX_UNORM255_EPS") == "1")
+            {
+                cacheDirectory += "-unorm255eps1";
             }
 
             return GraphicsConfig.EnableShaderCache && GraphicsConfig.TitleId != null
@@ -325,21 +343,12 @@ namespace Ryujinx.Graphics.Gpu.Shader
             ref GpuChannelGraphicsState graphicsState,
             ShaderAddresses addresses)
         {
-            if (_gpPrograms.TryGetValue(addresses, out CachedShaderProgram gpShaders) &&
-                IsShaderEqual(channel, ref poolState, ref graphicsState, gpShaders, addresses))
+            if (_gpPrograms.TryGetValue(addresses, out CachedShaderProgram gpShaders) && IsShaderEqual(channel, ref poolState, ref graphicsState, gpShaders, addresses))
             {
                 return gpShaders;
             }
 
-            bool foundCachedProgram = _graphicsShaderCache.TryFind(
-                channel,
-                ref poolState,
-                ref graphicsState,
-                addresses,
-                out gpShaders,
-                out CachedGraphicsGuestCode cachedGuestCode);
-
-            if (foundCachedProgram)
+            if (_graphicsShaderCache.TryFind(channel, ref poolState, ref graphicsState, addresses, out gpShaders, out CachedGraphicsGuestCode cachedGuestCode))
             {
                 _gpPrograms[addresses] = gpShaders;
                 return gpShaders;
@@ -389,10 +398,23 @@ namespace Ryujinx.Graphics.Gpu.Shader
             bool vertexHasStore = translatorContexts[1] != null && translatorContexts[1].HasStore;
             bool geometryHasStore = hasGeometryShader && translatorContexts[4].HasStore;
             bool geometryIsPassthrough = hasGeometryShader && translatorContexts[4].GpPassthrough;
-            bool vertexToCompute = ShouldConvertVertexToCompute(_context, vertexHasStore, geometryHasStore, hasGeometryShader, geometryIsPassthrough);
-            bool geometryToCompute = ShouldConvertGeometryToCompute(_context, geometryHasStore, geometryIsPassthrough);
 
-            if (geometryToCompute && geometryIsPassthrough && GraphicsConfig.EnableVtgViaCompute && !_context.Capabilities.SupportsGeometryShaderPassthrough)
+            bool vertexToCompute = ShouldConvertVertexToCompute(
+                _context,
+                vertexHasStore,
+                geometryHasStore,
+                hasGeometryShader,
+                geometryIsPassthrough);
+
+            bool geometryToCompute = ShouldConvertGeometryToCompute(
+                _context,
+                geometryHasStore,
+                geometryIsPassthrough);
+
+            if (geometryToCompute &&
+                geometryIsPassthrough &&
+                GraphicsConfig.EnableVtgViaCompute &&
+                !_context.Capabilities.SupportsGeometryShaderPassthrough)
             {
                 Logger.Info?.Print(
                     LogClass.Gpu,
@@ -424,6 +446,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
                     ShaderProgram program;
 
                     bool asCompute = (stageIndex == 0 && vertexToCompute) || (stageIndex == 3 && geometryToCompute);
+                    if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddShaderTranslation();
 
                     if (stageIndex == 0 && translatorContexts[0] != null)
                     {
@@ -517,18 +540,23 @@ namespace Ryujinx.Graphics.Gpu.Shader
         /// <param name="geometryHasStore">Whether the geometry shader has image or storage buffer store operations, if one exists</param>
         /// <param name="hasGeometryShader">Whether a geometry shader exists</param>
         /// <returns>True if the vertex shader should be converted to compute, false otherwise</returns>
-        public static bool ShouldConvertVertexToCompute(GpuContext context, bool vertexHasStore, bool geometryHasStore, bool hasGeometryShader, bool geometryIsPassthrough)
+        public static bool ShouldConvertVertexToCompute(
+            GpuContext context,
+            bool vertexHasStore,
+            bool geometryHasStore,
+            bool hasGeometryShader,
+            bool geometryIsPassthrough)
         {
-            // If the host does not support store operations on vertex,
-            // we need to emulate it on a compute shader.
             if (!context.Capabilities.SupportsVertexStoreAndAtomics && vertexHasStore)
             {
                 return true;
             }
 
-            // If any stage after the vertex stage is converted to compute,
-            // we need to convert vertex to compute too.
-            return hasGeometryShader && ShouldConvertGeometryToCompute(context, geometryHasStore, geometryIsPassthrough);
+            return hasGeometryShader &&
+                   ShouldConvertGeometryToCompute(
+                       context,
+                       geometryHasStore,
+                       geometryIsPassthrough);
         }
 
         /// <summary>
@@ -538,12 +566,11 @@ namespace Ryujinx.Graphics.Gpu.Shader
         /// <param name="context">GPU context of the shader</param>
         /// <param name="geometryHasStore">Whether the geometry shader has image or storage buffer store operations, if one exists</param>
         /// <returns>True if the geometry shader should be converted to compute, false otherwise</returns>
-        public static bool ShouldConvertGeometryToCompute(GpuContext context, bool geometryHasStore, bool geometryIsPassthrough)
+        public static bool ShouldConvertGeometryToCompute(
+            GpuContext context,
+            bool geometryHasStore,
+            bool geometryIsPassthrough)
         {
-            // A passthrough geometry shader can only run natively when the host supports the geometry
-            // shader passthrough extension. Without it, the stage has to be emulated on compute.
-            // Any other geometry shader runs natively as long as the host supports geometry shaders,
-            // so converting it to compute would only add intermediate buffers and barriers.
             return (!context.Capabilities.SupportsVertexStoreAndAtomics && geometryHasStore) ||
                    !context.Capabilities.SupportsGeometryShader ||
                    (GraphicsConfig.EnableVtgViaCompute &&
@@ -561,7 +588,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
         {
             return !capabilities.SupportsVertexStoreAndAtomics ||
                    !capabilities.SupportsGeometryShader ||
-                   (GraphicsConfig.EnableVtgViaCompute && !capabilities.SupportsGeometryShaderPassthrough);
+                   (GraphicsConfig.EnableVtgViaCompute &&
+                    !capabilities.SupportsGeometryShaderPassthrough);
         }
 
         /// <summary>
@@ -794,7 +822,16 @@ namespace Ryujinx.Graphics.Gpu.Shader
                 pathsB = dumper.Dump(codeB, compute: false);
             }
 
-            ShaderProgram program = currentStage.Translate(vertexA, asCompute);
+            TotkDiagShared.CurrentGuestHash = TotkDiagShared.ShadowTapOne ? TotkDiagShared.Hash(codeB) : null;
+            ShaderProgram program;
+            try
+            {
+                program = currentStage.Translate(vertexA, asCompute);
+            }
+            finally
+            {
+                TotkDiagShared.CurrentGuestHash = null;
+            }
 
             pathsB.Prepend(program);
             pathsA.Prepend(program);
@@ -826,7 +863,16 @@ namespace Ryujinx.Graphics.Gpu.Shader
             code ??= memoryManager.GetSpan(context.Address, context.Size).ToArray();
 
             ShaderDumpPaths paths = dumper?.Dump(code, context.Stage == ShaderStage.Compute) ?? default;
-            ShaderProgram program = context.Translate(asCompute);
+            TotkDiagShared.CurrentGuestHash = TotkDiagShared.ShadowTapOne ? TotkDiagShared.Hash(code) : null;
+            ShaderProgram program;
+            try
+            {
+                program = context.Translate(asCompute);
+            }
+            finally
+            {
+                TotkDiagShared.CurrentGuestHash = null;
+            }
 
             paths.Prepend(program);
 

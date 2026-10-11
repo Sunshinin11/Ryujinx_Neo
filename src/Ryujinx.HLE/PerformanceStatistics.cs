@@ -70,6 +70,8 @@ namespace Ryujinx.HLE
                 }
 
                 _frameRate[frameType] = frameRate;
+                _lastMaxFrameTime = _maxFrameTimeWindow;
+                _maxFrameTimeWindow = 0;
                 _framesRendered[frameType] = 0;
                 _accumulatedFrameTime[frameType] = 0;
             }
@@ -143,8 +145,24 @@ namespace Ryujinx.HLE
             {
                 _accumulatedFrameTime[frameType] += elapsedFrameTime;
 
+                if (elapsedFrameTime > _maxFrameTimeWindow)
+                {
+                    _maxFrameTimeWindow = elapsedFrameTime;
+                }
+
                 _framesRendered[frameType]++;
             }
+        }
+
+        private double _maxFrameTimeWindow;
+        private double _lastMaxFrameTime;
+
+        /// <summary>
+        /// Longest interval between two game frames in the last statistics window, in milliseconds.
+        /// </summary>
+        public double GetGameMaxFrameTime()
+        {
+            return _lastMaxFrameTime * 1000;
         }
 
         public double GetGameFrameRate()

@@ -52,7 +52,7 @@ namespace Ryujinx.Common.Diagnostics
                     }
                     else
                     {
-                        string flagsPath = System.IO.Path.Combine(Ryujinx.Common.Configuration.AppDataManager.BaseDirPath, "neo_flags.txt");
+                        string flagsPath = "/storage/emulated/0/Android/data/org.kenjinx.android/files/neo_flags.txt";
                         if (System.IO.File.Exists(flagsPath))
                         {
                             string text = System.IO.File.ReadAllText(flagsPath);

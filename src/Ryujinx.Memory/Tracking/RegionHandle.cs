@@ -339,6 +339,69 @@ namespace Ryujinx.Memory.Tracking
         }
 
         /// <summary>
+        /// Applies changed protection for adjacent virtual regions in contiguous batches.
+        /// </summary>
+        /// <param name="regions">Ordered regions from a single address view.</param>
+        /// <returns>True if at least one region changed protection.</returns>
+        private bool UpdateProtectionBatched(List<VirtualRegion> regions)
+        {
+            bool protectionChanged = false;
+            bool hasPendingRange = false;
+            ulong pendingAddress = 0;
+            ulong pendingEndAddress = 0;
+            MemoryPermission pendingPermission = default;
+            bool pendingGuest = false;
+
+            void FlushPendingRange()
+            {
+                if (!hasPendingRange)
+                {
+                    return;
+                }
+
+                _tracking.ProtectVirtualRange(
+                    pendingAddress,
+                    pendingEndAddress - pendingAddress,
+                    pendingPermission,
+                    pendingGuest);
+
+                hasPendingRange = false;
+            }
+
+            foreach (VirtualRegion region in regions)
+            {
+                if (!region.TryUpdateProtection(out MemoryPermission permission))
+                {
+                    FlushPendingRange();
+                    continue;
+                }
+
+                protectionChanged = true;
+
+                if (hasPendingRange &&
+                    pendingEndAddress == region.Address &&
+                    pendingPermission == permission &&
+                    pendingGuest == region.Guest)
+                {
+                    pendingEndAddress = region.EndAddress;
+                }
+                else
+                {
+                    FlushPendingRange();
+                    hasPendingRange = true;
+                    pendingAddress = region.Address;
+                    pendingEndAddress = region.EndAddress;
+                    pendingPermission = permission;
+                    pendingGuest = region.Guest;
+                }
+            }
+
+            FlushPendingRange();
+
+            return protectionChanged;
+        }
+
+        /// <summary>
         /// Consume the dirty flag for this handle, and reprotect so it can be set on the next write.
         /// </summary>
         /// <param name="asDirty">True if the handle should be reprotected as dirty, rather than have it cleared</param>
@@ -356,10 +419,10 @@ namespace Ryujinx.Memory.Tracking
 
             lock (_tracking.TrackingLock)
             {
-                foreach (VirtualRegion region in _allRegions)
-                {
-                    protectionChanged |= region.UpdateProtection();
-                }
+                // Keep host/software tracking and guest/NCE mappings as separate
+                // batches, then merge adjacent subregions inside each address view.
+                protectionChanged |= UpdateProtectionBatched(_regions);
+                protectionChanged |= UpdateProtectionBatched(_guestRegions);
             }
 
             if (!protectionChanged)

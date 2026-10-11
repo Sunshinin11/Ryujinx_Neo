@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 
 namespace Ryujinx.Memory
 {
-    public class MemoryProtectionException : Exception
+    class MemoryProtectionException : Exception
     {
         public MemoryProtectionException()
         {

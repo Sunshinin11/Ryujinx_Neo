@@ -247,8 +247,6 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         {
             context.Device.System.SurfaceFlinger.CreateLayer(out long displayLayerId, _pid);
             context.Device.System.SurfaceFlinger.CreateLayer(out long recordingLayerId, _pid);
-            // NEOV2-COSMIC5: a camada de gravacao continua existindo (o jogo pode abri-la sem erro),
-            // mas nunca vira a camada exibida.
             context.Device.System.SurfaceFlinger.MarkRecordingLayer(recordingLayerId);
             context.Device.System.SurfaceFlinger.SetRenderLayer(displayLayerId);
 

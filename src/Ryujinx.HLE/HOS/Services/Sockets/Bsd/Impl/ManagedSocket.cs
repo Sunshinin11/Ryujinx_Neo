@@ -419,6 +419,18 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
                     return result;
                 }
 
+                if (level == SocketOptionLevel.Socket && option == BsdSocketOption.SoNoOffload)
+                {
+                    // SO_NO_OFFLOAD is a Horizon/FreeBSD networking hint with no
+                    // equivalent required by the host socket API. Accept it as a
+                    // no-op so applications do not abort network initialization.
+                    Logger.Info?.Print(
+                        LogClass.ServiceBsd,
+                        "[NEOV2-BSD-NOOFFLOAD1] SO_NO_OFFLOAD accepted as a no-op.");
+
+                    return LinuxError.SUCCESS;
+                }
+
                 if (!WinSockHelper.TryConvertSocketOption(option, level, out SocketOptionName optionName))
                 {
                     Logger.Warning?.Print(LogClass.ServiceBsd, $"Unsupported SetSockOpt Option: {option} Level: {level}");

@@ -55,8 +55,6 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         public ShaderProperties Properties { get; }
 
-        public ShaderStage Stage => _stage;
-
         public ResourceReservations Reservations { get; }
 
         public ResourceManager(ShaderStage stage, IGpuAccessor gpuAccessor, ResourceReservations reservations = null)
@@ -186,41 +184,6 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             binding = setAndBinding.Binding;
             return true;
-        }
-
-        /// <summary>
-        /// NEOV2-ARRAYFB1: gets the binding of the texture array feedback storage buffer, creating it if needed.
-        /// </summary>
-        public bool TryGetTextureArrayFeedbackBinding(out int binding)
-        {
-            // Storage buffer writes are always available on fragment and compute shaders. Other stages
-            // need vertexPipelineStoresAndAtomics, so they keep the previous behavior.
-            if (_stage != ShaderStage.Fragment && _stage != ShaderStage.Compute)
-            {
-                binding = 0;
-                return false;
-            }
-
-            return TryGetStorageBufferBinding(TextureArrayFeedback.SbCbSlot, TextureArrayFeedback.SbCbOffset, write: true, out binding);
-        }
-
-        /// <summary>
-        /// NEOV2-ARRAYFB1: marks a texture or image array as reporting the indices it samples.
-        /// </summary>
-        public void SetTextureArrayFeedback(SetBindingPair setAndBinding, bool isImage)
-        {
-            Dictionary<TextureInfo, TextureMeta> dict = isImage ? _usedImages : _usedTextures;
-
-            foreach ((TextureInfo info, TextureMeta meta) in dict)
-            {
-                if (meta.Set == setAndBinding.SetIndex && meta.Binding == setAndBinding.Binding && info.ArrayLength > 1)
-                {
-                    TextureMeta newMeta = meta;
-                    newMeta.UsageFlags |= TextureUsageFlags.ArrayFeedback;
-                    dict[info] = newMeta;
-                    break;
-                }
-            }
         }
 
         private bool TryGetSbSlot(byte sbCbSlot, ushort sbCbOffset, out int slot)

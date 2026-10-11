@@ -62,8 +62,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             }
             else
             {
-                // NEOV2 CONDRENDER1: if the value still has GPU writes pending, reading it would stall the GPU
-                // thread until the GPU finishes. Render unconditionally instead, like Eden does on Turnip/Adreno.
+                // NEOV2 CONDRENDER1
                 if (context.Renderer.PreferUnconditionalRenderingOverReadback && IsGpuModified(memoryManager, gpuVa))
                 {
                     return ConditionalRenderEnabled.True;
@@ -112,10 +111,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             }
             else
             {
-                // NEOV2 CONDRENDER1: same rule Eden applies on Turnip and Qualcomm drivers
-                // (QueryCacheRuntime::HostConditionalRenderingCompareValues): when one of the values is still a
-                // pending query result or has pending GPU writes, do not wait for it on the CPU and render
-                // unconditionally. Values that are already final keep the exact CPU comparison below.
+                // NEOV2 CONDRENDER1
                 if (context.Renderer.PreferUnconditionalRenderingOverReadback &&
                     (evt != null ||
                      evt2 != null ||
@@ -147,13 +143,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             return counterCache.FindEvent(gpuVa);
         }
 
-        /// <summary>
-        /// NEOV2 CONDRENDER1: checks if a 64-bit condition value has GPU writes that were not copied back to guest memory yet.
-        /// Reading such a value on the CPU forces a wait for the GPU.
-        /// </summary>
-        /// <param name="memoryManager">Memory manager bound to the channel currently executing</param>
-        /// <param name="gpuVa">GPU virtual address of the value</param>
-        /// <returns>True if the value has pending GPU writes, false otherwise</returns>
+        // NEOV2 CONDRENDER1
         private static bool IsGpuModified(MemoryManager memoryManager, ulong gpuVa)
         {
             if (!memoryManager.IsMapped(gpuVa))

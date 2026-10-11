@@ -42,7 +42,6 @@ namespace Ryujinx.HLE.Utilities
                 partitionFileSystem = pfsTemp;
             }
 
-            // NEOV2-NCZ1: NSZ/XCZ aparecem como NSP/XCI comuns.
             partitionFileSystem = NczSupport.WrapIfCompressed(partitionFileSystem);
 
             fileSystem.ImportTickets(partitionFileSystem);

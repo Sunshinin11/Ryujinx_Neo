@@ -10,6 +10,12 @@ namespace Ryujinx.Graphics.GAL
 
         public readonly bool HasFrontFacingBug;
         public readonly bool HasVectorIndexingBug;
+
+        /// <summary>
+        /// Host can view a texture with its sRGB/UNORM counterpart format even when
+        /// <see cref="SupportsMismatchingViewFormat"/> is false (Turnip with closed view format lists).
+        /// </summary>
+        public readonly bool SupportsSrgbMismatchingViewFormat;
         public readonly bool NeedsFragmentOutputSpecialization;
         public readonly bool ReduceShaderPrecision;
 
@@ -136,7 +142,8 @@ namespace Ryujinx.Graphics.GAL
             int storageBufferOffsetAlignment,
             int textureBufferOffsetAlignment,
             int gatherBiasPrecision,
-            ulong maximumGpuMemory)
+            ulong maximumGpuMemory,
+            bool supportsSrgbMismatchingViewFormat = false)
         {
             Api = api;
             VendorName = vendorName;
@@ -200,6 +207,7 @@ namespace Ryujinx.Graphics.GAL
             TextureBufferOffsetAlignment = textureBufferOffsetAlignment;
             GatherBiasPrecision = gatherBiasPrecision;
             MaximumGpuMemory = maximumGpuMemory;
+            SupportsSrgbMismatchingViewFormat = supportsSrgbMismatchingViewFormat;
         }
     }
 }

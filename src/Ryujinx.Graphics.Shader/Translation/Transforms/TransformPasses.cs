@@ -11,6 +11,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
             RunPass<ForcePreciseEnable>(context);
             RunPass<VectorComponentSelect>(context);
             RunPass<TexturePass>(context);
+
             RunPass<SharedStoreSmallIntCas>(context);
             RunPass<SharedAtomicSignedCas>(context);
             RunPass<ShufflePass>(context);

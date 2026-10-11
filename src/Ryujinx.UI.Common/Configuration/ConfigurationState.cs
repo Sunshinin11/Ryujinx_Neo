@@ -4,6 +4,7 @@ using Ryujinx.Common.Configuration.Hid;
 using Ryujinx.Common.Configuration.Hid.Controller;
 using Ryujinx.Common.Configuration.Hid.Keyboard;
 using Ryujinx.Common.Configuration.Multiplayer;
+using Ryujinx.Common.Diagnostics;
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.Vulkan;
 using Ryujinx.HLE;
@@ -539,6 +540,16 @@ namespace Ryujinx.UI.Common.Configuration
             public ReactiveObject<bool> EnableTextureRecompression { get; private set; }
 
             /// <summary>
+            /// Global GPU command flush policy.
+            /// </summary>
+            public ReactiveObject<DrawFlushMode> DrawFlushMode { get; private set; }
+
+            /// <summary>
+            /// Global GPU buffer readback policy.
+            /// </summary>
+            public ReactiveObject<BufferReadbackMode> BufferReadbackMode { get; private set; }
+
+            /// <summary>
             /// Enables or disables Macro high-level emulation
             /// </summary>
             public ReactiveObject<bool> EnableMacroHLE { get; private set; }
@@ -596,6 +607,10 @@ namespace Ryujinx.UI.Common.Configuration
                 EnableShaderCache.Event += static (_, e) => LogValueChange(e, nameof(EnableShaderCache));
                 EnableTextureRecompression = new ReactiveObject<bool>();
                 EnableTextureRecompression.Event += static (_, e) => LogValueChange(e, nameof(EnableTextureRecompression));
+                DrawFlushMode = new ReactiveObject<DrawFlushMode>();
+                DrawFlushMode.Event += static (_, e) => LogValueChange(e, nameof(DrawFlushMode));
+                BufferReadbackMode = new ReactiveObject<BufferReadbackMode>();
+                BufferReadbackMode.Event += static (_, e) => LogValueChange(e, nameof(BufferReadbackMode));
                 GraphicsBackend = new ReactiveObject<GraphicsBackend>();
                 GraphicsBackend.Event += static (_, e) => LogValueChange(e, nameof(GraphicsBackend));
                 PreferredGpu = new ReactiveObject<string>();
@@ -780,6 +795,8 @@ namespace Ryujinx.UI.Common.Configuration
                 CustomVSyncInterval = Graphics.CustomVSyncInterval,
                 EnableShaderCache = Graphics.EnableShaderCache,
                 EnableTextureRecompression = Graphics.EnableTextureRecompression,
+                DrawFlushMode = Graphics.DrawFlushMode,
+                BufferReadbackMode = Graphics.BufferReadbackMode,
                 EnableMacroHLE = Graphics.EnableMacroHLE,
                 EnableColorSpacePassthrough = Graphics.EnableColorSpacePassthrough,
                 EnablePtc = System.EnablePtc,
@@ -900,6 +917,10 @@ namespace Ryujinx.UI.Common.Configuration
             Graphics.EnableCustomVSyncInterval.Value = false;
             Graphics.EnableShaderCache.Value = true;
             Graphics.EnableTextureRecompression.Value = false;
+            Graphics.DrawFlushMode.Value = DrawFlushMode.Default;
+            Graphics.BufferReadbackMode.Value = BufferReadbackMode.Default;
+            NeoGraphicsSettings.DrawFlushGlobalMode = DrawFlushMode.Default;
+            NeoGraphicsSettings.BufferReadbackGlobalMode = BufferReadbackMode.Default;
             Graphics.EnableMacroHLE.Value = true;
             Graphics.EnableColorSpacePassthrough.Value = false;
             Graphics.AntiAliasing.Value = AntiAliasing.None;
@@ -1709,6 +1730,10 @@ namespace Ryujinx.UI.Common.Configuration
             Graphics.CustomVSyncInterval.Value = configurationFileFormat.CustomVSyncInterval;
             Graphics.EnableShaderCache.Value = configurationFileFormat.EnableShaderCache;
             Graphics.EnableTextureRecompression.Value = configurationFileFormat.EnableTextureRecompression;
+            Graphics.DrawFlushMode.Value = configurationFileFormat.DrawFlushMode;
+            Graphics.BufferReadbackMode.Value = configurationFileFormat.BufferReadbackMode;
+            NeoGraphicsSettings.DrawFlushGlobalMode = Graphics.DrawFlushMode.Value;
+            NeoGraphicsSettings.BufferReadbackGlobalMode = Graphics.BufferReadbackMode.Value;
             Graphics.EnableMacroHLE.Value = configurationFileFormat.EnableMacroHLE;
             Graphics.EnableColorSpacePassthrough.Value = configurationFileFormat.EnableColorSpacePassthrough;
             System.EnablePtc.Value = configurationFileFormat.EnablePtc;

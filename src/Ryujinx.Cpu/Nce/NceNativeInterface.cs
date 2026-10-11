@@ -7,8 +7,10 @@ namespace Ryujinx.Cpu.Nce
     {
         private delegate ulong GetTickCounterDelegate();
         private delegate bool SuspendThreadHandlerDelegate();
+
         private static GetTickCounterDelegate _getTickCounter;
         private static SuspendThreadHandlerDelegate _suspendThreadHandler;
+
         private static nint _getTickCounterPtr;
         private static nint _suspendThreadHandlerPtr;
 
@@ -22,6 +24,7 @@ namespace Ryujinx.Cpu.Nce
         {
             _getTickCounter = GetTickCounter;
             _suspendThreadHandler = SuspendThreadHandler;
+
             _getTickCounterPtr = Marshal.GetFunctionPointerForDelegate(_getTickCounter);
             _suspendThreadHandlerPtr = Marshal.GetFunctionPointerForDelegate(_suspendThreadHandler);
         }
@@ -40,8 +43,7 @@ namespace Ryujinx.Cpu.Nce
 
         public static ulong GetTickCounter()
         {
-            ulong value = _tickSource?.Counter ?? 0UL;
-            return value;
+            return _tickSource?.Counter ?? 0UL;
         }
 
         public static bool SuspendThreadHandler()

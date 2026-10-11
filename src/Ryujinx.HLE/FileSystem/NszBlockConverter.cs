@@ -1,4 +1,3 @@
-#if !ANDROID
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -812,5 +811,3 @@ namespace Ryujinx.HLE.FileSystem
         }
     }
 }
-
-#endif

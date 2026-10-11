@@ -2,15 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
-// NEOV2-VP9EDEN1: porte em C# de VpxRangeEncoder e VpxBitStreamWriter
-// (eden: src/video_core/host1x/codecs/vp9.cpp).
 
 using System.Collections.Generic;
 using System.Numerics;
 
 namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
 {
-    /// <summary>Codificador aritmetico booleano do VP9, usado no cabecalho comprimido.</summary>
     internal sealed class VpxRangeEncoder
     {
         private const int HalfProbability = 128;
@@ -25,7 +22,6 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
             Write(false);
         }
 
-        /// <summary>Escreve os valueSize bits mais a direita de value.</summary>
         public void Write(int value, int valueSize)
         {
             for (int bit = valueSize - 1; bit >= 0; bit--)
@@ -51,7 +47,10 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                 localRange = _range - split;
             }
 
-            int shift = localRange == 0 ? 0 : BitOperations.LeadingZeroCount(localRange) - 24;
+            int shift = localRange == 0
+                ? 0
+                : BitOperations.LeadingZeroCount(localRange) - 24;
+
             localRange <<= shift;
             _count += shift;
 
@@ -61,7 +60,6 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
 
                 if (((_lowValue << (offset - 1)) >> 31) != 0)
                 {
-                    // Propaga o "vai um" pelos bytes ja escritos.
                     int index = _stream.Count - 1;
 
                     while (index >= 0 && _stream[index] == 0xff)
@@ -99,7 +97,6 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
         public byte[] ToArray() => _stream.ToArray();
     }
 
-    /// <summary>Escritor de bits (MSB primeiro) do cabecalho nao comprimido do VP9.</summary>
     internal sealed class VpxBitStreamWriter
     {
         private readonly List<byte> _bytes = new();
@@ -114,7 +111,6 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
             }
         }
 
-        /// <summary>Valor com sinal no formato su(n): magnitude em n bits seguida do bit de sinal.</summary>
         public void WriteS(int value, int valueSize)
         {
             bool sign = value < 0;
@@ -124,10 +120,11 @@ namespace Ryujinx.Graphics.Nvdec.Vp9FFmpeg
                 value = -value;
             }
 
-            WriteU(((uint)value << 1) | (sign ? 1u : 0u), valueSize + 1);
+            WriteU(
+                ((uint)value << 1) | (sign ? 1u : 0u),
+                valueSize + 1);
         }
 
-        /// <summary>delta_q do VP9 (6.2.10): bit de presenca e, se presente, su(4).</summary>
         public void WriteDeltaQ(int value)
         {
             bool deltaCoded = value != 0;

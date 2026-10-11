@@ -178,7 +178,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     // FragCoord X/Y must be divided by the render target scale, if resolution scaling is active,
                     // because the shader code is not expecting scaled values.
                     res = context.FPDivide(res, context.Load(StorageKind.ConstantBuffer, SupportBuffer.Binding, Const((int)SupportBufferField.RenderScale), Const(0)));
-
                     if (op.Imm10 == AttributeConsts.PositionY && context.TranslatorContext.Options.TargetApi != TargetApi.OpenGL)
                     {
                         // If YNegate is enabled, we need to flip the fragment coordinates vertically, unless

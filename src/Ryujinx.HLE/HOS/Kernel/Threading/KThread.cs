@@ -8,6 +8,7 @@ using Ryujinx.Horizon.Common;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace Ryujinx.HLE.HOS.Kernel.Threading
@@ -16,6 +17,9 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
     {
         private const int TlsUserDisableCountOffset = 0x100;
         private const int TlsUserInterruptFlagOffset = 0x102;
+        private const int LinuxArm64GuestThreadStackSize = 32 * 1024 * 1024;
+
+        private static int _largeHostStackLogged;
 
         public const int MaxWaitSyncObjects = 64;
 
@@ -191,11 +195,23 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
                 is64Bits = true;
             }
 
-            HostThread = new Thread(ThreadStart);
+            bool needsLargerHostStack =
+                customThreadStart == null &&
+                OperatingSystem.IsLinux() &&
+                RuntimeInformation.ProcessArchitecture == Architecture.Arm64;
+
+            if (needsLargerHostStack && Interlocked.Exchange(ref _largeHostStackLogged, 1) == 0)
+            {
+                Logger.Info?.Print(
+                    LogClass.Cpu,
+                    "[NEOV2-JITSTACK1] Linux ARM64 guest host-thread stack: 32 MiB");
+            }
+
+            HostThread = needsLargerHostStack
+                ? new Thread(ThreadStart, LinuxArm64GuestThreadStackSize)
+                : new Thread(ThreadStart);
 
             Context = owner?.CreateExecutionContext() ?? new ProcessExecutionContext();
-            if (Context is IThreadContextProvider { SupportsThreadContext: true } provider)
-                provider.InitializeThreadEntry(entrypoint);
 
             ThreadContext = new KThreadContext(Context);
 
@@ -636,41 +652,27 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
         public Result GetThreadContext3(out ThreadContext context)
         {
             context = default;
+
             lock (_activityOperationLock)
             {
                 KernelContext.CriticalSection.Enter();
-                try
-                {
-                    if ((_forcePauseFlags & ThreadSchedState.ThreadPauseFlag) == 0)
-                        return KernelResult.InvalidState;
-                    if (!TerminationRequested)
-                    {
-                        // A force-pause request is not an acknowledgement that native execution stopped.
-                        if (Context is IThreadContextProvider { SupportsThreadContext: true } provider)
-                        {
-                            if (GetEffectiveRunningCore() >= 0 || IsPinned || !provider.TryGetThreadContext(out CpuThreadContext snapshot))
-                                return KernelResult.InvalidState;
-                            context = ConvertThreadContext(snapshot);
-                        }
-                        else context = GetCurrentContext();
-                    }
-                    return Result.Success;
-                }
-                finally { KernelContext.CriticalSection.Leave(); }
-            }
-        }
 
-        internal static ThreadContext ConvertThreadContext(CpuThreadContext snapshot)
-        {
-            ThreadContext context = new();
-            Span<ulong> registers = context.Registers.AsSpan();
-            Span<V128> vectors = context.FpuRegisters.AsSpan();
-            for (int i = 0; i < registers.Length; i++) registers[i] = snapshot.Registers[i];
-            for (int i = 0; i < vectors.Length; i++) vectors[i] = snapshot.Vectors[i];
-            context.Fp = snapshot.Registers[29]; context.Lr = snapshot.Registers[30]; context.Sp = snapshot.Registers[31];
-            context.Pc = snapshot.Pc; context.Pstate = snapshot.Pstate & 0xFF0FFE20;
-            context.Fpcr = snapshot.Fpcr; context.Fpsr = snapshot.Fpsr; context.Tpidr = (ulong)snapshot.TpidrroEl0;
-            return context;
+                if ((_forcePauseFlags & ThreadSchedState.ThreadPauseFlag) == 0)
+                {
+                    KernelContext.CriticalSection.Leave();
+
+                    return KernelResult.InvalidState;
+                }
+
+                if (!TerminationRequested)
+                {
+                    context = GetCurrentContext();
+                }
+
+                KernelContext.CriticalSection.Leave();
+            }
+
+            return Result.Success;
         }
 
         private static uint GetPsr(IExecutionContext context)
@@ -1472,20 +1474,6 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
         public void ClearUserInterruptFlag()
         {
             Owner.CpuMemory.Write<ushort>(_tlsAddress + TlsUserInterruptFlagOffset, 0);
-        }
-
-        // NEOV2-TLSHANDLE1: the real kernel stores each thread's own handle in its thread local region
-        // (svc::ThreadLocalRegion::thread_handle, offset 0x110), for the main thread at process start and for
-        // every thread in svcCreateThread. SDK 22 locks (nlibsdk heap mutex) read it as the owner tag and abort
-        // when it is 0.
-        private const int TlsThreadHandleOffset = 0x110;
-
-        public void SetThreadLocalHandle(int handle)
-        {
-            if (_tlsAddress != 0 && Owner != null)
-            {
-                Owner.CpuMemory.Write<int>(_tlsAddress + TlsThreadHandleOffset, handle);
-            }
         }
     }
 }

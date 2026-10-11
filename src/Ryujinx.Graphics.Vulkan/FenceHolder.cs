@@ -237,16 +237,14 @@ namespace Ryujinx.Graphics.Vulkan
         public bool IsSignaledLazy()
         {
             // O workaround do Turnip existe para evitar vkWaitForFences com timeout zero.
+            // Com timeline, a consulta e vkGetSemaphoreCounterValue, entao ele nao se aplica.
             if (_alwaysWaits && !_usesTimeline)
             {
                 return false;
             }
 
-            // NEOV2 TIMELINE-LAZY1: no Turnip (kgsl), a timeline e emulada e vkGetSemaphoreCounterValue
-            // faz uma espera no kernel (kgsl_syncobj_wait) segurando a trava da timeline, o que tambem
-            // trava o QueueSubmit2 da thread de submit. Esta consulta e so oportunista (liberar command
-            // buffers), entao usa apenas a conclusao ja conhecida, sem chamar o driver. As esperas reais
-            // continuam atualizando esse valor. Mesmo principio do Eden (MasterSemaphore::IsFree).
+            // NEOV2 TIMELINE-LAZY1:
+            // no Turnip evita consultar a timeline emulada pelo driver neste caminho oportunista.
             if (_alwaysWaits && _usesTimeline && Ryujinx.Common.Diagnostics.NeoGraphicsSettings.TimelineLazyEnabled)
             {
                 ulong value = TimelineValue;

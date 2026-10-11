@@ -651,6 +651,10 @@ namespace Ryujinx.Graphics.Gpu.Image
             Size? sizeHint = null,
             MultiRange? range = null)
         {
+            // Galaxy presentation compatibility fixes are restricted to the
+            // presentation path and the exact observed dimensions below.
+            bool galaxyPresentProbe = memoryManager == null && range != null;
+
             bool isSamplerTexture = (flags & TextureSearchFlags.ForSampler) != 0;
             bool discard = (flags & TextureSearchFlags.DiscardData) != 0;
 
@@ -719,6 +723,27 @@ namespace Ryujinx.Graphics.Gpu.Image
                 Texture overlap = _textureOverlaps[index];
 
                 TextureMatchQuality matchQuality = overlap.IsExactMatch(info, flags);
+
+                // GALAXY-DIRECT-TEST8
+                // Presentation descriptor is 1920x1080, but Galaxy's live GPU RT
+                // is 1905x1152 over the exact same block-linear allocation.
+                // Return the live GPU texture directly instead of allowing the
+                // zero-backed 1920x1080 presentation texture to win as ExactMatch.
+                if (galaxyPresentProbe &&
+                    overlap.Info.GpuAddress != 0 &&
+                    overlap.Info.Width == 1905 &&
+                    overlap.Info.Height == 1152 &&
+                    info.Width == 1920 &&
+                    info.Height == 1080 &&
+                    overlap.Range.Equals(range.Value) &&
+                    overlap.Info.FormatInfo.Format == info.FormatInfo.Format &&
+                    overlap.Info.Target == info.Target &&
+                    overlap.Info.IsLinear == info.IsLinear &&
+                    overlap.Info.GobBlocksInY == info.GobBlocksInY &&
+                    overlap.Info.GobBlocksInZ == info.GobBlocksInZ)
+                {
+                    return overlap;
+                }
 
                 if (matchQuality != TextureMatchQuality.NoMatch)
                 {
@@ -789,6 +814,8 @@ namespace Ryujinx.Graphics.Gpu.Image
             // Find view compatible matches.
             int overlapsCount = 0;
 
+            bool galaxySamplerCopy = info.GpuAddress == 0x1CF970000UL;
+
             if (info.Target != Target.TextureBuffer)
             {
                 _texturesLock.EnterReadLock();
@@ -827,6 +854,52 @@ namespace Ryujinx.Graphics.Gpu.Image
                     out int firstLayer,
                     out int firstLevel,
                     flags);
+
+                // GALAXY-COPY-TEST7
+                // Presentation asks for 1920x1080, while the GPU-rendered backing
+                // texture is 1905x1152 over the exact same physical allocation.
+                // Promote only this exact presentation alias to CopyOnly.
+                if (galaxyPresentProbe &&
+                    overlapCompatibility == TextureViewCompatibility.LayoutIncompatible &&
+                    overlap.Info.GpuAddress != 0 &&
+                    overlap.Info.Width == 1905 &&
+                    overlap.Info.Height == 1152 &&
+                    info.Width == 1920 &&
+                    info.Height == 1080 &&
+                    overlap.Range.Equals(range.Value) &&
+                    overlap.LayerSize == sizeInfo.LayerSize &&
+                    overlap.Info.FormatInfo.Format == info.FormatInfo.Format &&
+                    overlap.Info.Target == info.Target &&
+                    overlap.Info.IsLinear == info.IsLinear &&
+                    overlap.Info.GobBlocksInY == info.GobBlocksInY &&
+                    overlap.Info.GobBlocksInZ == info.GobBlocksInZ)
+                {
+                    overlapCompatibility = TextureViewCompatibility.CopyOnly;
+                }
+
+                // GALAXY-SAMPLER-COPY-TEST19
+                // Galaxy first renders to a 1905x1664 texture, then samples the exact
+                // same block-linear allocation as 1920x1584. Preserve the GPU-resident
+                // contents through the cache's normal copy dependency instead of
+                // creating the sampler from stale (zeroed) guest memory.
+                if (galaxySamplerCopy &&
+                    isSamplerTexture &&
+                    overlapCompatibility == TextureViewCompatibility.LayoutIncompatible &&
+                    overlap.Info.GpuAddress == info.GpuAddress &&
+                    overlap.Info.Width == 1905 &&
+                    overlap.Info.Height == 1664 &&
+                    info.Width == 1920 &&
+                    info.Height == 1584 &&
+                    overlap.Range.Equals(range.Value) &&
+                    overlap.LayerSize == sizeInfo.LayerSize &&
+                    overlap.Info.FormatInfo.Format == info.FormatInfo.Format &&
+                    overlap.Info.Target == info.Target &&
+                    overlap.Info.IsLinear == info.IsLinear &&
+                    overlap.Info.GobBlocksInY == info.GobBlocksInY &&
+                    overlap.Info.GobBlocksInZ == info.GobBlocksInZ)
+                {
+                    overlapCompatibility = TextureViewCompatibility.CopyOnly;
+                }
 
                 if (overlapCompatibility >= TextureViewCompatibility.FormatAlias)
                 {
@@ -887,7 +960,7 @@ namespace Ryujinx.Graphics.Gpu.Image
                     {
                         // Only copy compatible. If there's another choice for a FULLY compatible texture, choose that instead.
 
-                        texture = new Texture(_context, _physicalMemory, info, sizeInfo, range.Value, scaleMode);
+                        texture = new Texture(_context, _physicalMemory, info, sizeInfo, range.Value, scaleMode); if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddTexture();
 
                         // If the new texture is larger than the existing one, we need to fill the remaining space with CPU data,
                         // otherwise we only need the data that is copied from the existing texture, without loading the CPU data.
@@ -936,7 +1009,7 @@ namespace Ryujinx.Graphics.Gpu.Image
             // No match, create a new texture.
             if (texture == null)
             {
-                texture = new Texture(_context, _physicalMemory, info, sizeInfo, range.Value, scaleMode);
+                texture = new Texture(_context, _physicalMemory, info, sizeInfo, range.Value, scaleMode); if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddTexture();
 
                 // Step 1: Find textures that are view compatible with the new texture.
                 // Any textures that are incompatible will contain garbage data, so they should be removed where possible.
@@ -1061,9 +1134,25 @@ namespace Ryujinx.Graphics.Gpu.Image
 
                 texture.InitializeGroup(hasLayerViews, hasMipViews, incompatibleOverlaps);
 
+                bool e32 = Ryujinx.Graphics.Gpu.Engine.TotkDiagE12.Enabled && texture.Info.Width == texture.Info.Height && (texture.Info.Width == 800 || texture.Info.Width == 720);
+                if (e32)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    sb.Append($"[TOTK-E32] create id={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(texture)} va=0x{texture.Info.GpuAddress:X} {texture.Info.Target} layers={texture.Info.DepthOrLayers} fmt={texture.Format} sampler={isSamplerTexture} overlaps={overlapsCount} viewCompat={viewCompatible} full={fullyCompatible} setData={setData} discard={ShouldDiscard(discard, texture, sizeHint)}");
+                    for (int i = 0; i < overlapsCount; i++)
+                    {
+                        Texture o = _textureOverlaps[i];
+                        string c = i < viewCompatible ? $"{_overlapInfo[i].Compatibility} fl={_overlapInfo[i].FirstLayer}" : "incompat";
+                        sb.Append($" | o{i} id={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(o)} va=0x{o.Info.GpuAddress:X} {o.Info.Target} {o.Info.Width}x{o.Info.Height} lv={o.Info.Levels} ls={o.LayerSize} pool={o.HadPoolOwner} l={o.Info.DepthOrLayers} fmt={o.Format} view={o.IsView} inCache={o.CacheNode != null} mod={o.CheckModified(false)} {c}");
+                    }
+                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, sb.ToString());
+                }
+
                 // We need to synchronize before copying the old view data to the texture,
                 // otherwise the copied data would be overwritten by a future synchronization.
+                long neoCreateT0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 texture.InitializeData(false, setData && !ShouldDiscard(discard, texture, sizeHint));
+                if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddCreate(neoCreateT0);
 
                 texture.Group.InitializeOverlaps();
 
@@ -1099,6 +1188,11 @@ namespace Ryujinx.Graphics.Gpu.Image
 
                         overlap.SynchronizeMemory();
                         texture.CreateCopyDependency(overlap, oInfo.FirstLayer, oInfo.FirstLevel, false);
+
+                        if (e32)
+                        {
+                            Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[TOTK-E32] copydep o va=0x{overlap.Info.GpuAddress:X} -> layer {oInfo.FirstLayer} lvl {oInfo.FirstLevel}");
+                        }
                     }
                     else
                     {
@@ -1109,6 +1203,11 @@ namespace Ryujinx.Graphics.Gpu.Image
                         overlap.SynchronizeMemory();
 
                         overlap.HostTexture.CopyTo(newView, 0, 0);
+
+                        if (e32)
+                        {
+                            Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[TOTK-E32] copyto o va=0x{overlap.Info.GpuAddress:X} -> layer {oInfo.FirstLayer} lvl {oInfo.FirstLevel}");
+                        }
 
                         overlap.ReplaceView(texture, overlapInfo, newView, oInfo.FirstLayer, oInfo.FirstLevel);
                     }
@@ -1466,9 +1565,6 @@ namespace Ryujinx.Graphics.Gpu.Image
         public void Tick()
         {
             _cache.ProcessShortCache();
-
-            // NEOV2-GPUMEM1: Eden-style collection driven by the real device memory usage.
-            _cache.TickMemoryPressure();
         }
 
         /// <summary>

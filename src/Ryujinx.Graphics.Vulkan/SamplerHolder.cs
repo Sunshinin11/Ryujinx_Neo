@@ -9,9 +9,13 @@ namespace Ryujinx.Graphics.Vulkan
         private readonly VulkanRenderer _gd;
         private readonly Auto<DisposableSampler> _sampler;
 
+        // TOTK-C827-SAMPLERTRACE5
+        public SamplerCreateInfo Info { get; }
+
         public unsafe SamplerHolder(VulkanRenderer gd, Device device, SamplerCreateInfo info)
         {
             _gd = gd;
+            Info = info;
 
             gd.Samplers.Add(this);
 

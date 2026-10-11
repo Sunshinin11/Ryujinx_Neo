@@ -1,9 +1,11 @@
 using Ryujinx.Common.Memory;
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Shader;
 using Silk.NET.Vulkan;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -39,12 +41,22 @@ namespace Ryujinx.Graphics.Vulkan
         protected bool IsMainPipeline;
         private PipelineState _newState;
 
+        // NEOV2 Etapa 23: last extended dynamic state values recorded on the current command buffer.
+        private bool _extendedDynamicStateValid;
+        private ulong _extendedDynamicStateApplied;
         private bool _graphicsStateDirty;
         private bool _computeStateDirty;
         private bool _bindingBarriersDirty;
         private PrimitiveTopology _topology;
 
         private ulong _currentPipelineHandle;
+
+        // MUA3: the crash scene consistently submits compute work immediately before the
+        // graphics command buffers that hang the Adreno command processor. Keep this state
+        // across command-buffer rotations so the first matching scene draw can establish a
+        // conservative memory dependency on all earlier compute work.
+        private bool _mua3ComputeSinceSceneBarrier;
+        private static int _mua3SceneBarrierCount;
 
         protected Auto<DisposablePipeline> Pipeline;
 
@@ -74,6 +86,31 @@ namespace Ryujinx.Graphics.Vulkan
 
         private IndexBufferState _indexBuffer;
         private IndexBufferPattern _indexBufferPattern;
+        private ulong _vertexBufferSetCalls;
+        private ulong _vertexBufferPipelineChanges;
+        private ulong _graphicsPipelineLookupCalls;
+        private ulong _graphicsPipelineSameHandle;
+        private ulong _drawIndexedProfileCalls;
+        private long _drawIndexedProfileSamples;
+        private long _drawIndexedProfileIndexTicks;
+        private long _drawIndexedProfilePipelineTicks;
+        private long _drawIndexedProfileRenderPassTicks;
+        private long _drawIndexedProfilePreDrawTicks;
+        private long _drawIndexedProfileIssueTicks;
+        private long _drawIndexedProfileTotalTicks;
+        private long _drawIndexedProfileWindowStart = Stopwatch.GetTimestamp();
+        private bool _drawPipelineProfileActive;
+        private long _drawPipelineProfilePrepTicks;
+        private long _drawPipelineProfileDynamicTicks;
+        private long _drawPipelineProfileBufferTicks;
+        private long _drawPipelineProfileBindingBarrierTicks;
+        private long _drawPipelineProfileCreateTicks;
+        private long _drawPipelineProfileExtendedDynamicTicks;
+        private long _drawPipelineProfileBarrierFlushTicks;
+        private long _drawPipelineProfileDescriptorTicks;
+        private long _drawPipelineProfileCreateCount;
+        private long _drawPipelineProfileVertexDirtyCount;
+        private long _drawPipelineProfileBindingDirtyCount;
         private readonly BufferState[] _transformFeedbackBuffers;
         private readonly VertexBufferState[] _vertexBuffers;
         private ulong _vertexBuffersDirty;
@@ -92,6 +129,40 @@ namespace Ryujinx.Graphics.Vulkan
 
         private FeedbackLoopAspects _feedbackLoop;
         private bool _passWritesDepthStencil;
+
+        // TOTK-DRAW-TRACE1
+        // Diagnostic only: log each fragment shader hash once when explicitly enabled.
+        private static readonly bool _totkDrawTrace = Environment.GetEnvironmentVariable("RYUJINX_TOTK_DRAW_TRACE") == "1";
+
+        // TOTK-RESOURCE-TRACE1
+        private static readonly bool _totkResourceTrace = Environment.GetEnvironmentVariable("RYUJINX_TOTK_RESOURCE_TRACE") == "1";
+        private static readonly HashSet<string> _totkLoggedResourceSignatures = new(StringComparer.Ordinal);
+
+        // TOTK-PRODUCER-TRACE1
+        // Diagnostic only. Traces draws that write the three candidate
+        // lighting/environment resources identified by the same-process A/B.
+        private static readonly bool _totkProducerTrace = Environment.GetEnvironmentVariable("RYUJINX_TOTK_PRODUCER_TRACE") == "1";
+        private static readonly HashSet<string> _totkLoggedProducerSignatures = new(StringComparer.Ordinal);
+        private static readonly HashSet<string> _totkLoggedFragmentHashes = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly object _totkTraceLock = new();
+
+        // TOTK-FRAGMENT-SKIP1
+        private static readonly HashSet<string> _totkSkippedFragmentHashes = GetTotkSkippedFragmentHashes();
+        private static readonly HashSet<string> _totkLoggedSkippedFragmentHashes = new(StringComparer.OrdinalIgnoreCase);
+
+        // TOTK-0EEF-RTMASK2
+        private static readonly string _totk0eefMaskRt =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_0EEF_MASK_RT");
+        private bool _totk0eefRtMasked;
+        private int _totk0eefMaskedRt = -1;
+        private PipelineColorBlendAttachmentState _totk0eefSavedRtState;
+        private static readonly HashSet<int> _totk0eefLoggedMaskRts = new();
+
+        private static readonly bool _lm3DrawTrace = Environment.GetEnvironmentVariable("RYUJINX_LM3_DRAW_TRACE") == "1";
+        private static readonly HashSet<string> _lm3SkippedFragmentHashes = GetLm3SkippedFragmentHashes();
+        private static readonly HashSet<string> _lm3LoggedFragmentHashes = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly object _lm3TraceLock = new();
+        private long _lm3SkippedDrawCount;
 
         private readonly PipelineColorBlendAttachmentState[] _storedBlend;
         public ulong DrawCount { get; private set; }
@@ -334,7 +405,14 @@ namespace Ryujinx.Graphics.Vulkan
             EndRenderPass();
             RecreateComputePipelineIfNeeded();
 
+            RecordMua3Command(Mua3CommandKind.Dispatch, groupsX, groupsY);
+
             Gd.Api.CmdDispatch(CommandBuffer, (uint)groupsX, (uint)groupsY, (uint)groupsZ);
+
+            if (GraphicsCompatibility.IsMua3)
+            {
+                _mua3ComputeSinceSceneBarrier = true;
+            }
         }
 
         public void DispatchComputeIndirect(Auto<DisposableBuffer> indirectBuffer, int indirectBufferOffset)
@@ -347,11 +425,376 @@ namespace Ryujinx.Graphics.Vulkan
             EndRenderPass();
             RecreateComputePipelineIfNeeded();
 
+            RecordMua3Command(Mua3CommandKind.DispatchIndirect, indirectBufferOffset, 0);
+
             Gd.Api.CmdDispatchIndirect(CommandBuffer, indirectBuffer.Get(Cbs, indirectBufferOffset, 12).Value, (ulong)indirectBufferOffset);
+
+            if (GraphicsCompatibility.IsMua3)
+            {
+                _mua3ComputeSinceSceneBarrier = true;
+            }
         }
 
-        // PipelineFull overrides these hooks to scope VK_EXT_conditional_rendering to the guest draw only.
-        // Keeping preparation and helper commands outside the scope prevents internal work from being skipped.
+        private unsafe void InsertMua3SceneComputeBarrierIfNeeded()
+        {
+            if (!_mua3ComputeSinceSceneBarrier ||
+                !GraphicsCompatibility.IsMua3 ||
+                !GraphicsCompatibility.TryGetMua3Program(_program, out Mua3ShaderIdentity identity) ||
+                identity.Geometry != 0x100719F30UL ||
+                identity.Fragment != 0x100719E30UL)
+            {
+                return;
+            }
+
+            EndRenderPass();
+
+            MemoryBarrier memoryBarrier = new()
+            {
+                SType = StructureType.MemoryBarrier,
+                SrcAccessMask = AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
+                DstAccessMask = AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
+            };
+
+            Gd.Api.CmdPipelineBarrier(
+                CommandBuffer,
+                PipelineStageFlags.AllCommandsBit,
+                PipelineStageFlags.AllCommandsBit,
+                0,
+                1,
+                new ReadOnlySpan<MemoryBarrier>(in memoryBarrier),
+                0,
+                ReadOnlySpan<BufferMemoryBarrier>.Empty,
+                0,
+                ReadOnlySpan<ImageMemoryBarrier>.Empty);
+
+            _mua3ComputeSinceSceneBarrier = false;
+
+            int count = System.Threading.Interlocked.Increment(ref _mua3SceneBarrierCount);
+
+            if (count == 1 || count % 100 == 0)
+            {
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"[MUA3-SYNC] Full compute-to-scene barrier inserted (count={count}, shaders=[{identity}])");
+            }
+        }
+
+        private void RecordMua3Command(Mua3CommandKind kind, int argument0, int argument1)
+        {
+            if (!GraphicsCompatibility.IsMua3)
+            {
+                return;
+            }
+
+            GraphicsCompatibility.TryGetMua3Program(_program, out Mua3ShaderIdentity shaderIdentity);
+
+            Mua3CrashTelemetry.RecordCommand(
+                CommandBuffer,
+                kind,
+                _currentPipelineHandle,
+                _newState.Internal.GetHashCode(),
+                _program == null ? 0 : RuntimeHelpers.GetHashCode(_program),
+                _program?.Stages ?? 0,
+                shaderIdentity,
+                (int)_topology,
+                argument0,
+                argument1);
+        }
+
+        // TOTK-FRAGMENT-SKIP1
+        private static HashSet<string> GetTotkSkippedFragmentHashes()
+        {
+            string hashes = Environment.GetEnvironmentVariable("RYUJINX_TOTK_SKIP_FRAGMENT_HASHES");
+
+            if (string.IsNullOrWhiteSpace(hashes))
+            {
+                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            return new HashSet<string>(
+                hashes.Split([',', ';', ' ', '\t', '\r', '\n'],
+                    StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static HashSet<string> GetLm3SkippedFragmentHashes()
+        {
+            string hashes = Environment.GetEnvironmentVariable("RYUJINX_LM3_SKIP_FRAGMENT_HASHES");
+
+            if (string.IsNullOrWhiteSpace(hashes))
+            {
+                // NEOV2 LM3-TITLE-GATE1: retain the verified LM3 workaround without
+                // requiring the canonical launcher to expose it to every other title.
+                hashes = "c59ff19a53ddf3e198ba6876bc12aa342005c49c2fd29a0296d25a1250d33d14";
+            }
+
+            return new HashSet<string>(
+                hashes.Split([',', ';', ' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        // TOTK-PRODUCER-TRACE1
+        private void TraceTotkCandidateProducer()
+        {
+            if (!_totkProducerTrace ||
+                _program == null ||
+                FramebufferParams == null ||
+                FramebufferParams.AttachmentsCount == 0)
+            {
+                return;
+            }
+
+            string producerHash = _program.FragmentShaderHash;
+
+            if (string.IsNullOrEmpty(producerHash))
+            {
+                return;
+            }
+
+            TextureView[] attachments = FramebufferParams.GetAttachmentViews();
+
+            for (int i = 0; i < attachments.Length; i++)
+            {
+                TextureView view = attachments[i];
+
+                if (view?.Storage == null)
+                {
+                    continue;
+                }
+
+                string format = view.VkFormat.ToString();
+
+                // TOTK-PRODUCER-TRACE2
+                // For the 64x64x6 candidate, identify the underlying storage rather
+                // than the attachment view. Cubemaps are commonly rendered one face
+                // at a time, so the bound view can be 64x64x1 over a 64x64x6 storage.
+                bool candidate =
+                    ((format == "B10G11R11UfloatPack32" ||
+                      view.Storage.VkFormat.ToString() == "B10G11R11UfloatPack32") &&
+                     view.Storage.Info.Width == 64 &&
+                     view.Storage.Info.Height == 64 &&
+                     view.Storage.Info.GetDepthOrLayers() == 6) ||
+                    // TOTK-PRODUCER-TRACE3-B10-LOWRES
+                    ((format == "B10G11R11UfloatPack32" ||
+                      view.Storage.VkFormat.ToString() == "B10G11R11UfloatPack32") &&
+                     ((view.Storage.Info.Width == 320 &&
+                       view.Storage.Info.Height == 180) ||
+                      (view.Storage.Info.Width == 400 &&
+                       view.Storage.Info.Height == 225)) &&
+                     view.Storage.Info.GetDepthOrLayers() >= 2) ||
+
+                    (format == "R16G16B16A16Sfloat" &&
+                     view.Width == 256 &&
+                     view.Height == 256) ||
+
+                    (format == "R16G16Unorm" &&
+                     view.Width == 500 &&
+                     view.Height == 400);
+
+                if (!candidate)
+                {
+                    continue;
+                }
+
+                int storageId =
+                    System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(view.Storage);
+
+                long currentGeneration = view.Storage.TotkWriteGeneration;
+                long writeGeneration = currentGeneration + 1;
+
+                string role;
+
+                if (i < FramebufferParams.ColorAttachmentsCount)
+                {
+                    role = "C" + FramebufferParams.AttachmentIndices[i];
+                }
+                else
+                {
+                    role = "DS";
+                }
+
+                string producerKey =
+                    producerHash + "|" +
+                    role + "|" +
+                    storageId.ToString("X") + "|" +
+                    format + "|" +
+                    view.Width + "x" + view.Height + "|" +
+                    view.Layers + "|" +
+                    writeGeneration;
+
+                lock (_totkTraceLock)
+                {
+                    if (_totkLoggedProducerSignatures.Add(producerKey))
+                    {
+                        Logger.Info?.Print(
+                            LogClass.Gpu,
+                            $"[TOTK-PRODUCER-TRACE] HASH={producerHash} DRAW={DrawCount} ATT={role} S={storageId:X} CURRENT_G={currentGeneration} WRITE_G={writeGeneration} VF={format}:{view.Width}x{view.Height}:L{view.Layers}:FL{view.FirstLayer}:FM{view.FirstLevel} SF={view.Storage.VkFormat}:{view.Storage.Info.Width}x{view.Storage.Info.Height}:L{view.Storage.Info.GetDepthOrLayers()}");
+                    }
+                }
+            }
+        }
+
+        // TOTK-C827-DEPTH-PRODUCER12
+        private static readonly bool _totkC827DepthProducerTrace =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_C827_DEPTH_PRODUCER_TRACE") == "1";
+
+        private void TraceTotkC827DepthAttachmentDraw()
+        {
+            if (!_totkC827DepthProducerTrace ||
+                _program == null ||
+                FramebufferParams == null)
+            {
+                return;
+            }
+
+            TextureView depthView = FramebufferParams.GetDepthStencilView();
+
+            if (depthView?.Storage == null)
+            {
+                return;
+            }
+
+            // O B128 observado no c827 e D32Sfloat.
+            // Evita encher historico de storages de outros formatos.
+            if (!string.Equals(
+                depthView.Storage.VkFormat.ToString(),
+                "D32Sfloat",
+                StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            string hash = _program.FragmentShaderHash ?? "<none>";
+
+            // TOTK-C827-DEPTH-PRODUCER12C
+            string viewInfo =
+                $"{depthView.VkFormat}:" +
+                $"{depthView.Width}x{depthView.Height}:" +
+                $"L{depthView.Layers}:" +
+                $"FL{depthView.FirstLayer}:" +
+                $"FM{depthView.FirstLevel}:" +
+                $"DT={_newState.DepthTestEnable}:" +
+                $"DW={_newState.DepthWriteEnable}:" +
+                $"ST={_newState.StencilTestEnable}";
+
+            depthView.Storage.TotkRecordDepthDraw(
+                hash,
+                DrawCount,
+                _passWritesDepthStencil,
+                viewInfo);
+        }
+
+        private bool ShouldSkipLm3FragmentDraw()
+        {
+            TraceTotkC827DepthAttachmentDraw();
+            TraceTotkCandidateProducer();
+            // TOTK-DRAW-TRACE1
+            // Runs for any title only when RYUJINX_TOTK_DRAW_TRACE=1.
+            // Does not skip or modify the draw.
+            if (_totkDrawTrace && _program != null)
+            {
+                string totkHash = _program.FragmentShaderHash;
+
+                if (!string.IsNullOrEmpty(totkHash))
+                {
+                    lock (_totkTraceLock)
+                    {
+                        if (_totkLoggedFragmentHashes.Add(totkHash))
+                        {
+                            Logger.Info?.Print(
+                                LogClass.Gpu,
+                                $"[TOTK-DRAW-TRACE] HASH={totkHash} DRAW={DrawCount} TOPOLOGY={_topology} PIPELINE=0x{_currentPipelineHandle:X}");
+                        }
+                    }
+                }
+            }
+
+            // TOTK-RESOURCE-TRACE1
+            if (_totkResourceTrace && _program != null)
+            {
+                string resourceHash = _program.FragmentShaderHash;
+
+                if (!string.IsNullOrEmpty(resourceHash))
+                {
+                    string resourceSignature = _descriptorSetUpdater.GetTotkFragmentResourceSignature();
+                    string resourceKey = resourceHash + "|" + resourceSignature;
+
+                    lock (_totkTraceLock)
+                    {
+                        if (_totkLoggedResourceSignatures.Add(resourceKey))
+                        {
+                            Logger.Info?.Print(
+                                LogClass.Gpu,
+                                $"[TOTK-RESOURCE-TRACE] HASH={resourceHash} DRAW={DrawCount} RES={resourceSignature}");
+                        }
+                    }
+                }
+            }
+
+            // TOTK-FRAGMENT-SKIP1
+            if (_program != null && _totkSkippedFragmentHashes.Count != 0)
+            {
+                string totkSkipHash = _program.FragmentShaderHash;
+
+                if (!string.IsNullOrEmpty(totkSkipHash) &&
+                    _totkSkippedFragmentHashes.Contains(totkSkipHash))
+                {
+                    lock (_totkTraceLock)
+                    {
+                        if (_totkLoggedSkippedFragmentHashes.Add(totkSkipHash))
+                        {
+                            Logger.Info?.Print(
+                                LogClass.Gpu,
+                                $"[TOTK-FRAGMENT-SKIP] HASH={totkSkipHash} DRAW={DrawCount}");
+                        }
+                    }
+
+                    return true;
+                }
+            }
+
+            if (!GraphicsCompatibility.IsLm3 ||
+                _program == null ||
+                (!_lm3DrawTrace && _lm3SkippedFragmentHashes.Count == 0))
+            {
+                return false;
+            }
+
+            string hash = _program.FragmentShaderHash;
+
+            if (string.IsNullOrEmpty(hash))
+            {
+                return false;
+            }
+
+            if (_lm3DrawTrace)
+            {
+                lock (_lm3TraceLock)
+                {
+                    if (_lm3LoggedFragmentHashes.Add(hash))
+                    {
+                        Logger.Info?.Print(LogClass.Gpu, $"[LM3-CANDIDATE39] DRAW-FRAGMENT HASH={hash}");
+                    }
+                }
+            }
+
+            if (!_lm3SkippedFragmentHashes.Contains(hash))
+            {
+                return false;
+            }
+
+            long count = ++_lm3SkippedDrawCount;
+
+            if (count == 1 || count % 1000 == 0)
+            {
+                Logger.Info?.Print(LogClass.Gpu, $"[LM3-CANDIDATE39] SAFE-SKIPPED DRAW count={count} HASH={hash}");
+            }
+
+            return true;
+        }
+
+        // PipelineFull overrides these hooks to scope VK_EXT_conditional_rendering
+        // to the actual guest draw command only.
         protected virtual void BeginHostConditionalRenderingForDraw() { }
         protected virtual void EndHostConditionalRenderingForDraw() { }
 
@@ -369,6 +812,12 @@ namespace Ryujinx.Graphics.Vulkan
 
             BeginRenderPass();
             DrawCount++;
+            RecordMua3Command(Mua3CommandKind.Draw, vertexCount, instanceCount);
+
+            if (ShouldSkipLm3FragmentDraw())
+            {
+                return;
+            }
 
             if (Gd.TopologyUnsupported(_topology))
             {
@@ -434,15 +883,35 @@ namespace Ryujinx.Graphics.Vulkan
                 return;
             }
 
+            bool profileDraw = (++_drawIndexedProfileCalls & 0xff) == 0;
+            long profileStart = profileDraw ? Stopwatch.GetTimestamp() : 0;
+
             UpdateIndexBufferPattern();
 
-            if (!RecreateGraphicsPipelineIfNeeded())
+            long profileAfterIndex = profileDraw ? Stopwatch.GetTimestamp() : 0;
+
+            _drawPipelineProfileActive = profileDraw;
+            bool pipelineReady = RecreateGraphicsPipelineIfNeeded();
+            _drawPipelineProfileActive = false;
+
+            if (!pipelineReady)
             {
                 return;
             }
 
+            long profileAfterPipeline = profileDraw ? Stopwatch.GetTimestamp() : 0;
+
             BeginRenderPass();
+            long profileAfterRenderPass = profileDraw ? Stopwatch.GetTimestamp() : 0;
             DrawCount++;
+            RecordMua3Command(Mua3CommandKind.DrawIndexed, indexCount, instanceCount);
+
+            if (ShouldSkipLm3FragmentDraw())
+            {
+                return;
+            }
+
+            long profileAfterPreDraw = profileDraw ? Stopwatch.GetTimestamp() : 0;
 
             if (_indexBufferPattern != null)
             {
@@ -473,6 +942,86 @@ namespace Ryujinx.Graphics.Vulkan
                 Gd.Api.CmdDrawIndexed(CommandBuffer, (uint)indexCount, (uint)instanceCount, (uint)firstIndex, firstVertex, (uint)firstInstance);
                 EndHostConditionalRenderingForDraw();
             }
+
+            if (profileDraw)
+            {
+                long profileEnd = Stopwatch.GetTimestamp();
+                RecordDrawIndexedProfile(
+                    profileAfterIndex - profileStart,
+                    profileAfterPipeline - profileAfterIndex,
+                    profileAfterRenderPass - profileAfterPipeline,
+                    profileAfterPreDraw - profileAfterRenderPass,
+                    profileEnd - profileAfterPreDraw,
+                    profileEnd - profileStart,
+                    profileEnd);
+            }
+        }
+
+        private void RecordDrawIndexedProfile(
+            long indexTicks,
+            long pipelineTicks,
+            long renderPassTicks,
+            long preDrawTicks,
+            long issueTicks,
+            long totalTicks,
+            long now)
+        {
+            _drawIndexedProfileSamples++;
+            _drawIndexedProfileIndexTicks += indexTicks;
+            _drawIndexedProfilePipelineTicks += pipelineTicks;
+            _drawIndexedProfileRenderPassTicks += renderPassTicks;
+            _drawIndexedProfilePreDrawTicks += preDrawTicks;
+            _drawIndexedProfileIssueTicks += issueTicks;
+            _drawIndexedProfileTotalTicks += totalTicks;
+
+            long windowTicks = now - _drawIndexedProfileWindowStart;
+
+            if (windowTicks < Stopwatch.Frequency * 5)
+            {
+                return;
+            }
+
+            static double EstimatedMs(long ticks) =>
+                ticks * 256000.0 / Stopwatch.Frequency;
+
+            Logger.Info?.Print(
+                LogClass.Gpu,
+                $"[NEOV2-DRAW-STAGE-PROFILE1] windowMs={windowTicks * 1000.0 / Stopwatch.Frequency:F0} samples={_drawIndexedProfileSamples} " +
+                $"indexMs={EstimatedMs(_drawIndexedProfileIndexTicks):F1} " +
+                $"pipelineMs={EstimatedMs(_drawIndexedProfilePipelineTicks):F1} " +
+                $"prepMs={EstimatedMs(_drawPipelineProfilePrepTicks):F1} " +
+                $"dynamicMs={EstimatedMs(_drawPipelineProfileDynamicTicks):F1} " +
+                $"buffersMs={EstimatedMs(_drawPipelineProfileBufferTicks):F1} " +
+                $"bindingBarrierMs={EstimatedMs(_drawPipelineProfileBindingBarrierTicks):F1} " +
+                $"createMs={EstimatedMs(_drawPipelineProfileCreateTicks):F1} " +
+                $"extendedMs={EstimatedMs(_drawPipelineProfileExtendedDynamicTicks):F1} " +
+                $"barrierFlushMs={EstimatedMs(_drawPipelineProfileBarrierFlushTicks):F1} " +
+                $"descriptorMs={EstimatedMs(_drawPipelineProfileDescriptorTicks):F1} " +
+                $"createN={_drawPipelineProfileCreateCount} vertexDirtyN={_drawPipelineProfileVertexDirtyCount} bindingDirtyN={_drawPipelineProfileBindingDirtyCount} " +
+                $"renderPassMs={EstimatedMs(_drawIndexedProfileRenderPassTicks):F1} " +
+                $"preDrawMs={EstimatedMs(_drawIndexedProfilePreDrawTicks):F1} " +
+                $"issueMs={EstimatedMs(_drawIndexedProfileIssueTicks):F1} " +
+                $"totalMs={EstimatedMs(_drawIndexedProfileTotalTicks):F1}");
+
+            _drawIndexedProfileSamples = 0;
+            _drawIndexedProfileIndexTicks = 0;
+            _drawIndexedProfilePipelineTicks = 0;
+            _drawIndexedProfileRenderPassTicks = 0;
+            _drawIndexedProfilePreDrawTicks = 0;
+            _drawIndexedProfileIssueTicks = 0;
+            _drawIndexedProfileTotalTicks = 0;
+            _drawPipelineProfilePrepTicks = 0;
+            _drawPipelineProfileDynamicTicks = 0;
+            _drawPipelineProfileBufferTicks = 0;
+            _drawPipelineProfileBindingBarrierTicks = 0;
+            _drawPipelineProfileCreateTicks = 0;
+            _drawPipelineProfileExtendedDynamicTicks = 0;
+            _drawPipelineProfileBarrierFlushTicks = 0;
+            _drawPipelineProfileDescriptorTicks = 0;
+            _drawPipelineProfileCreateCount = 0;
+            _drawPipelineProfileVertexDirtyCount = 0;
+            _drawPipelineProfileBindingDirtyCount = 0;
+            _drawIndexedProfileWindowStart = now;
         }
 
         public void DrawIndexedIndirect(BufferRange indirectBuffer)
@@ -490,6 +1039,12 @@ namespace Ryujinx.Graphics.Vulkan
 
             BeginRenderPass();
             DrawCount++;
+            RecordMua3Command(Mua3CommandKind.DrawIndexedIndirect, indirectBuffer.Size, 1);
+
+            if (ShouldSkipLm3FragmentDraw())
+            {
+                return;
+            }
 
             if (_indexBufferPattern != null)
             {
@@ -544,6 +1099,12 @@ namespace Ryujinx.Graphics.Vulkan
 
             BeginRenderPass();
             DrawCount++;
+            RecordMua3Command(Mua3CommandKind.DrawIndexedIndirectCount, maxDrawCount, stride);
+
+            if (ShouldSkipLm3FragmentDraw())
+            {
+                return;
+            }
 
             if (_indexBufferPattern != null)
             {
@@ -565,10 +1126,9 @@ namespace Ryujinx.Graphics.Vulkan
                 BeginRenderPass(); // May have been interrupted to set buffer data.
                 ResumeTransformFeedbackInternal();
 
-                BeginHostConditionalRenderingForDraw();
-
                 if (Gd.Capabilities.SupportsIndirectParameters)
                 {
+                    BeginHostConditionalRenderingForDraw();
                     Gd.DrawIndirectCountApi.CmdDrawIndexedIndirectCount(
                         CommandBuffer,
                         indirectBufferAuto.Get(Cbs, 0, indirectBuffer.Size).Value,
@@ -577,30 +1137,30 @@ namespace Ryujinx.Graphics.Vulkan
                         (ulong)parameterBuffer.Offset,
                         (uint)maxDrawCount,
                         (uint)stride);
+                    EndHostConditionalRenderingForDraw();
                 }
                 else
                 {
                     // This is also fine because the indirect data conversion always zeros
                     // the entries that are past the current draw count.
 
+                    BeginHostConditionalRenderingForDraw();
                     Gd.Api.CmdDrawIndexedIndirect(
                         CommandBuffer,
                         indirectBufferAuto.Get(Cbs, 0, indirectBuffer.Size).Value,
                         0,
                         (uint)maxDrawCount,
                         (uint)stride);
+                    EndHostConditionalRenderingForDraw();
                 }
-
-                EndHostConditionalRenderingForDraw();
             }
             else
             {
                 ResumeTransformFeedbackInternal();
 
-                BeginHostConditionalRenderingForDraw();
-
                 if (Gd.Capabilities.SupportsIndirectParameters)
                 {
+                    BeginHostConditionalRenderingForDraw();
                     Gd.DrawIndirectCountApi.CmdDrawIndexedIndirectCount(
                         CommandBuffer,
                         buffer,
@@ -609,19 +1169,20 @@ namespace Ryujinx.Graphics.Vulkan
                         (ulong)parameterBuffer.Offset,
                         (uint)maxDrawCount,
                         (uint)stride);
+                    EndHostConditionalRenderingForDraw();
                 }
                 else
                 {
                     // Not fully correct, but we can't do much better if the host does not support indirect count.
+                    BeginHostConditionalRenderingForDraw();
                     Gd.Api.CmdDrawIndexedIndirect(
                         CommandBuffer,
                         buffer,
                         (ulong)indirectBuffer.Offset,
                         (uint)maxDrawCount,
                         (uint)stride);
+                    EndHostConditionalRenderingForDraw();
                 }
-
-                EndHostConditionalRenderingForDraw();
             }
         }
 
@@ -641,6 +1202,12 @@ namespace Ryujinx.Graphics.Vulkan
             BeginRenderPass();
             ResumeTransformFeedbackInternal();
             DrawCount++;
+            RecordMua3Command(Mua3CommandKind.DrawIndirect, indirectBuffer.Size, 1);
+
+            if (ShouldSkipLm3FragmentDraw())
+            {
+                return;
+            }
 
             BeginHostConditionalRenderingForDraw();
             Gd.Api.CmdDrawIndirect(CommandBuffer, buffer, (ulong)indirectBuffer.Offset, 1, (uint)indirectBuffer.Size);
@@ -673,6 +1240,12 @@ namespace Ryujinx.Graphics.Vulkan
             BeginRenderPass();
             ResumeTransformFeedbackInternal();
             DrawCount++;
+            RecordMua3Command(Mua3CommandKind.DrawIndirectCount, maxDrawCount, stride);
+
+            if (ShouldSkipLm3FragmentDraw())
+            {
+                return;
+            }
 
             BeginHostConditionalRenderingForDraw();
             Gd.DrawIndirectCountApi.CmdDrawIndirectCount(
@@ -923,14 +1496,11 @@ namespace Ryujinx.Graphics.Vulkan
 
         public void SetIndexBuffer(BufferRange buffer, IndexType type)
         {
-            if (buffer.Handle != BufferHandle.Null)
-            {
-                _indexBuffer = new IndexBufferState(buffer.Handle, buffer.Offset, buffer.Size, type.Convert());
-            }
-            else
-            {
-                _indexBuffer = IndexBufferState.Null;
-            }
+            // NEOV2 INDEXBIND-DIRECT1: the exact-binding guard hit only 0.074% in
+            // TotK while running for every indexed draw. Keep this hot path direct.
+            _indexBuffer = buffer.Handle != BufferHandle.Null
+                ? new IndexBufferState(buffer.Handle, buffer.Offset, buffer.Size, type.Convert())
+                : IndexBufferState.Null;
 
             _needsIndexBufferRebind = true;
         }
@@ -999,9 +1569,19 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 return;
             }
+
             PipelineShaderStageCreateInfo[] stages = internalProgram.GetInfos();
 
             _program = internalProgram;
+
+            // TOTK-DEPTHWRITE-TARGET15C
+            // O cache de extended dynamic state depende apenas dos valores de estado,
+            // nao do shader. Para o teste por hash, force a reaplicacao normal do
+            // estado quando o programa mudar.
+            if (!string.IsNullOrWhiteSpace(_totkDepthWriteOffTargetHash))
+            {
+                _extendedDynamicStateValid = false;
+            }
 
             _descriptorSetUpdater.SetProgram(Cbs, internalProgram, _currentPipelineHandle != 0);
             _bindingBarriersDirty = true;
@@ -1287,7 +1867,16 @@ namespace Ryujinx.Graphics.Vulkan
         {
             int count = Math.Min(Constants.MaxVertexBuffers, vertexBuffers.Length);
 
-            _newState.Internal.VertexBindingDescriptions[0] = new VertexInputBindingDescription(0, 0, VertexInputRate.Vertex);
+            Span<VertexInputBindingDescription> bindingDescriptions =
+                _newState.Internal.VertexBindingDescriptions.AsSpan();
+            VertexInputBindingDescription zeroBinding =
+                new(0, 0, VertexInputRate.Vertex);
+            bool pipelineStateChanged =
+                bindingDescriptions[0].Binding != zeroBinding.Binding ||
+                bindingDescriptions[0].Stride != zeroBinding.Stride ||
+                bindingDescriptions[0].InputRate != zeroBinding.InputRate;
+
+            bindingDescriptions[0] = zeroBinding;
 
             int validCount = 1;
 
@@ -1314,10 +1903,18 @@ namespace Ryujinx.Graphics.Vulkan
                         int binding = i + 1;
                         int descriptorIndex = validCount++;
 
-                        _newState.Internal.VertexBindingDescriptions[descriptorIndex] = new VertexInputBindingDescription(
+                        VertexInputBindingDescription newDescription = new(
                             (uint)binding,
                             (uint)vertexBuffer.Stride,
                             inputRate);
+                        ref VertexInputBindingDescription oldDescription =
+                            ref bindingDescriptions[descriptorIndex];
+
+                        pipelineStateChanged |=
+                            oldDescription.Binding != newDescription.Binding ||
+                            oldDescription.Stride != newDescription.Stride ||
+                            oldDescription.InputRate != newDescription.InputRate;
+                        oldDescription = newDescription;
 
                         int vbSize = vertexBuffer.Buffer.Size;
 
@@ -1376,8 +1973,27 @@ namespace Ryujinx.Graphics.Vulkan
 
             _vertexBufferUpdater.Commit(Cbs);
 
+            pipelineStateChanged |=
+                _newState.VertexBindingDescriptionsCount != (uint)validCount;
             _newState.VertexBindingDescriptionsCount = (uint)validCount;
-            SignalStateChange();
+
+            _vertexBufferSetCalls++;
+            _vertexBufferPipelineChanges += pipelineStateChanged ? 1UL : 0UL;
+
+            if ((_vertexBufferSetCalls & 0x3ffff) == 0)
+            {
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"[NEOV2-VERTEXSTATE-DEDUP1] calls={_vertexBufferSetCalls} pipelineChanges={_vertexBufferPipelineChanges}");
+            }
+
+            // NEOV2 VERTEXSTATE-DEDUP1: buffer handles, offsets and sizes are dynamic
+            // bindings and do not form part of the Vulkan graphics pipeline. Revalidate the
+            // pipeline only when stride, input rate, binding index or count actually changes.
+            if (pipelineStateChanged)
+            {
+                SignalStateChange();
+            }
         }
 
         public void SetViewports(ReadOnlySpan<Viewport> viewports)
@@ -1457,6 +2073,7 @@ namespace Ryujinx.Graphics.Vulkan
             _descriptorSetUpdater.SignalCommandBufferChange();
             DynamicState.ForceAllDirty();
             _currentPipelineHandle = 0;
+            _extendedDynamicStateValid = false;
         }
 
         private void CreateFramebuffer(Span<ITexture> colors, ITexture depthStencil, bool filterWriteMasked)
@@ -1677,8 +2294,236 @@ namespace Ryujinx.Graphics.Vulkan
             _passWritesDepthStencil |= (_newState.DepthTestEnable && _newState.DepthWriteEnable) || _newState.StencilTestEnable;
         }
 
+        // TOTK-0EEF-RTMASK2
+        private void ApplyTotk0eefRtMask()
+        {
+            int requestedRt = -1;
+
+            if (!string.IsNullOrWhiteSpace(_totk0eefMaskRt))
+            {
+                int.TryParse(_totk0eefMaskRt, out requestedRt);
+            }
+
+            bool is0eef =
+                _program != null &&
+                string.Equals(
+                    _program.FragmentShaderHash,
+                    "0eef97d9282a01ff0e5e354b8261000a589e2b7576c2696b344375446f7fd35f",
+                    StringComparison.OrdinalIgnoreCase);
+
+            bool shouldMask =
+                is0eef &&
+                requestedRt >= 0 &&
+                requestedRt < Constants.MaxRenderTargets;
+
+            if (_totk0eefRtMasked &&
+                (!shouldMask || requestedRt != _totk0eefMaskedRt))
+            {
+                _newState.Internal.ColorBlendAttachmentState[_totk0eefMaskedRt] =
+                    _totk0eefSavedRtState;
+
+                _totk0eefRtMasked = false;
+                _totk0eefMaskedRt = -1;
+                SignalStateChange();
+            }
+
+            if (shouldMask && !_totk0eefRtMasked)
+            {
+                ref PipelineColorBlendAttachmentState rt =
+                    ref _newState.Internal.ColorBlendAttachmentState[requestedRt];
+
+                _totk0eefSavedRtState = rt;
+                _totk0eefMaskedRt = requestedRt;
+
+                rt.ColorWriteMask = 0;
+
+                _totk0eefRtMasked = true;
+                SignalStateChange();
+
+                lock (_totkTraceLock)
+                {
+                    if (_totk0eefLoggedMaskRts.Add(requestedRt))
+                    {
+                        Logger.Info?.Print(
+                            LogClass.Gpu,
+                            $"[TOTK-0EEF-RTMASK2] ACTIVE RT={requestedRt}");
+                    }
+                }
+            }
+        }
+
+        // TOTK-7F0FA-DEPTHWRITE-OFF13
+        private static readonly bool _totk7f0faDepthWriteOff =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_7F0FA_DEPTHWRITE_OFF") == "1";
+
+        private bool _totk7f0faDepthWriteOffLogged;
+
+        // TOTK-6451-DEPTHWRITE-OFF14
+        private static readonly bool _totk6451DepthWriteOff =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_6451_DEPTHWRITE_OFF") == "1";
+
+        private bool _totk6451DepthWriteOffLogged;
+
+        // TOTK-DEPTHWRITE-TARGET15
+        private static readonly string _totkDepthWriteOffTargetHash =
+            Environment.GetEnvironmentVariable("RYUJINX_TOTK_DEPTHWRITE_OFF_HASH");
+
+        private bool _totkDepthWriteOffTargetLogged;
+
+        private bool GetTotkDepthWriteEnable()
+        {
+            bool enabled = _newState.DepthWriteEnable;
+
+            if (enabled &&
+                !string.IsNullOrWhiteSpace(_totkDepthWriteOffTargetHash) &&
+                _program != null &&
+                string.Equals(
+                    _program.FragmentShaderHash,
+                    _totkDepthWriteOffTargetHash,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                TextureView totkTargetDepthView =
+                    FramebufferParams?.GetDepthStencilView();
+
+                if (totkTargetDepthView?.Storage != null &&
+                    string.Equals(
+                        totkTargetDepthView.Storage.VkFormat.ToString(),
+                        "D32Sfloat",
+                        StringComparison.Ordinal) &&
+                    (
+                        (totkTargetDepthView.Width == 1280 &&
+                         totkTargetDepthView.Height == 720) ||
+                        (totkTargetDepthView.Width == 1600 &&
+                         totkTargetDepthView.Height == 900)
+                    ))
+                {
+                    if (!_totkDepthWriteOffTargetLogged)
+                    {
+                        int totkTargetStorageId =
+                            System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(
+                                totkTargetDepthView.Storage);
+
+                        Logger.Info?.Print(
+                            LogClass.Gpu,
+                            $"[TOTK-DEPTHWRITE-TARGET15] ACTIVE " +
+                            $"HASH={_program.FragmentShaderHash} " +
+                            $"DRAW={DrawCount} " +
+                            $"S={totkTargetStorageId:X} " +
+                            $"DS={totkTargetDepthView.VkFormat}:" +
+                            $"{totkTargetDepthView.Width}x{totkTargetDepthView.Height} " +
+                            $"DT={_newState.DepthTestEnable} " +
+                            $"guestDW={_newState.DepthWriteEnable} " +
+                            $"hostDW=False");
+
+                        _totkDepthWriteOffTargetLogged = true;
+                    }
+
+                    return false;
+                }
+            }
+
+            if (_totk6451DepthWriteOff &&
+                enabled &&
+                _program != null &&
+                string.Equals(
+                    _program.FragmentShaderHash,
+                    "6451d153996862a938aef16844d39b8c073ce2da74de0621114d002df9784b6c",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                TextureView depthView6451 =
+                    FramebufferParams?.GetDepthStencilView();
+
+                if (depthView6451?.Storage != null &&
+                    string.Equals(
+                        depthView6451.Storage.VkFormat.ToString(),
+                        "D32Sfloat",
+                        StringComparison.Ordinal) &&
+                    (
+                        (depthView6451.Width == 1600 && depthView6451.Height == 900) ||
+                        (depthView6451.Width == 1280 && depthView6451.Height == 720)
+                    ))
+                {
+                    if (!_totk6451DepthWriteOffLogged)
+                    {
+                        int storageId =
+                            System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(
+                                depthView6451.Storage);
+
+                        Logger.Info?.Print(
+                            LogClass.Gpu,
+                            $"[TOTK-6451-DEPTHWRITE-OFF14] ACTIVE " +
+                            $"HASH={_program.FragmentShaderHash} " +
+                            $"DRAW={DrawCount} " +
+                            $"S={storageId:X} " +
+                            $"DS={depthView6451.VkFormat}:{depthView6451.Width}x{depthView6451.Height} " +
+                            $"DT={_newState.DepthTestEnable} " +
+                            $"guestDW={_newState.DepthWriteEnable} " +
+                            $"hostDW=False");
+
+                        _totk6451DepthWriteOffLogged = true;
+                    }
+
+                    return false;
+                }
+            }
+
+            if (!_totk7f0faDepthWriteOff ||
+                !enabled ||
+                _program == null ||
+                !string.Equals(
+                    _program.FragmentShaderHash,
+                    "7f0fa6eb658bd7929e1a305ee13e9524491f3c4e73d0dad0897d2c92ed59e541",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return enabled;
+            }
+
+            TextureView depthView =
+                FramebufferParams?.GetDepthStencilView();
+
+            if (depthView?.Storage == null ||
+                !string.Equals(
+                    depthView.Storage.VkFormat.ToString(),
+                    "D32Sfloat",
+                    StringComparison.Ordinal) ||
+                !(
+                    (depthView.Width == 1600 && depthView.Height == 900) ||
+                    (depthView.Width == 1280 && depthView.Height == 720)
+                 ))
+            {
+                return enabled;
+            }
+
+            if (!_totk7f0faDepthWriteOffLogged)
+            {
+                int storageId =
+                    System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(
+                        depthView.Storage);
+
+                Logger.Info?.Print(
+                    LogClass.Gpu,
+                    $"[TOTK-7F0FA-DEPTHWRITE-OFF13] ACTIVE " +
+                    $"HASH={_program.FragmentShaderHash} " +
+                    $"S={storageId:X} " +
+                    $"DS={depthView.VkFormat}:{depthView.Width}x{depthView.Height} " +
+                    $"guestDepthWrite={_newState.DepthWriteEnable} " +
+                    $"hostDepthWrite=False");
+
+                _totk7f0faDepthWriteOffLogged = true;
+            }
+
+            return false;
+        }
+
         private bool RecreateGraphicsPipelineIfNeeded()
         {
+            // NEOV2-DRAW-PIPELINE-PROFILE2: sampled breakdown of the dominant
+            // graphics backend path. Sampling is armed by DrawIndexed only.
+            bool profile = _drawPipelineProfileActive;
+            long profileStart = profile ? Stopwatch.GetTimestamp() : 0;
+
+            InsertMua3SceneComputeBarrierIfNeeded();
+
             if (FramebufferParams != null &&
                 FramebufferParams.AttachmentsCount == 0 &&
                 FramebufferParams.Width == 1 &&
@@ -1702,7 +2547,11 @@ namespace Ryujinx.Graphics.Vulkan
                 Gd.FlushAllCommands();
             }
 
+            long profileAfterPrep = profile ? Stopwatch.GetTimestamp() : 0;
+
             DynamicState.ReplayIfDirty(Gd, CommandBuffer);
+
+            long profileAfterDynamic = profile ? Stopwatch.GetTimestamp() : 0;
 
             if (_needsIndexBufferRebind && _indexBufferPattern == null)
             {
@@ -1724,6 +2573,11 @@ namespace Ryujinx.Graphics.Vulkan
 
             if (_vertexBuffersDirty != 0)
             {
+                if (profile)
+                {
+                    _drawPipelineProfileVertexDirtyCount++;
+                }
+
                 while (_vertexBuffersDirty != 0)
                 {
                     int i = BitOperations.TrailingZeroCount(_vertexBuffersDirty);
@@ -1736,16 +2590,35 @@ namespace Ryujinx.Graphics.Vulkan
                 _vertexBufferUpdater.Commit(Cbs);
             }
 
+            long profileAfterBuffers = profile ? Stopwatch.GetTimestamp() : 0;
+
             if (_bindingBarriersDirty)
             {
+                if (profile)
+                {
+                    _drawPipelineProfileBindingDirtyCount++;
+                }
+
                 // Stale barriers may have been activated by switching program. Emit any that are relevant.
                 _descriptorSetUpdater.InsertBindingBarriers(Cbs);
 
                 _bindingBarriersDirty = false;
             }
 
-            if (UpdateFeedbackLoop() || _graphicsStateDirty || Pbp != PipelineBindPoint.Graphics)
+            long profileAfterBindingBarriers = profile ? Stopwatch.GetTimestamp() : 0;
+
+            // TOTK-0EEF-RTMASK2: apply after guest state updates, immediately before pipeline creation.
+            ApplyTotk0eefRtMask();
+
+            bool createPipeline = UpdateFeedbackLoop() || _graphicsStateDirty || Pbp != PipelineBindPoint.Graphics;
+
+            if (createPipeline)
             {
+                if (profile)
+                {
+                    _drawPipelineProfileCreateCount++;
+                }
+
                 if (!CreatePipeline(PipelineBindPoint.Graphics))
                 {
                     return false;
@@ -1755,11 +2628,72 @@ namespace Ryujinx.Graphics.Vulkan
                 Pbp = PipelineBindPoint.Graphics;
             }
 
+            long profileAfterCreate = profile ? Stopwatch.GetTimestamp() : 0;
+
+            if (PipelineState.UsesExtendedDynamicState(Gd))
+            {
+                ApplyExtendedDynamicState();
+            }
+
+            long profileAfterExtendedDynamic = profile ? Stopwatch.GetTimestamp() : 0;
+
             Gd.Barriers.Flush(Cbs, _program, _feedbackLoop != 0, RenderPassActive, _rpHolder, EndRenderPassDelegate);
+
+            long profileAfterBarrierFlush = profile ? Stopwatch.GetTimestamp() : 0;
 
             _descriptorSetUpdater.UpdateAndBindDescriptorSets(Cbs, PipelineBindPoint.Graphics);
 
+            if (profile)
+            {
+                long profileEnd = Stopwatch.GetTimestamp();
+                _drawPipelineProfilePrepTicks += profileAfterPrep - profileStart;
+                _drawPipelineProfileDynamicTicks += profileAfterDynamic - profileAfterPrep;
+                _drawPipelineProfileBufferTicks += profileAfterBuffers - profileAfterDynamic;
+                _drawPipelineProfileBindingBarrierTicks += profileAfterBindingBarriers - profileAfterBuffers;
+                _drawPipelineProfileCreateTicks += profileAfterCreate - profileAfterBindingBarriers;
+                _drawPipelineProfileExtendedDynamicTicks += profileAfterExtendedDynamic - profileAfterCreate;
+                _drawPipelineProfileBarrierFlushTicks += profileAfterBarrierFlush - profileAfterExtendedDynamic;
+                _drawPipelineProfileDescriptorTicks += profileEnd - profileAfterBarrierFlush;
+            }
+
             return true;
+        }
+
+        private void ApplyExtendedDynamicState()
+        {
+            ulong key = _newState.Internal.Id6 & PipelineState.ExtendedDynamicStateMask;
+
+            if (_extendedDynamicStateValid && key == _extendedDynamicStateApplied)
+            {
+                return;
+            }
+
+            Silk.NET.Vulkan.Extensions.EXT.ExtExtendedDynamicState api = Gd.ExtendedDynamicStateApi;
+
+            api.CmdSetCullMode(CommandBuffer, _newState.CullMode);
+            api.CmdSetFrontFace(CommandBuffer, _newState.FrontFace);
+            api.CmdSetDepthTestEnable(CommandBuffer, _newState.DepthTestEnable);
+            // TOTK-7F0FA-DEPTHWRITE-OFF13
+            api.CmdSetDepthWriteEnable(CommandBuffer, GetTotkDepthWriteEnable());
+            api.CmdSetDepthCompareOp(CommandBuffer, _newState.DepthCompareOp);
+            api.CmdSetStencilTestEnable(CommandBuffer, _newState.StencilTestEnable);
+            api.CmdSetStencilOp(
+                CommandBuffer,
+                StencilFaceFlags.FaceFrontBit,
+                _newState.StencilFrontFailOp,
+                _newState.StencilFrontPassOp,
+                _newState.StencilFrontDepthFailOp,
+                _newState.StencilFrontCompareOp);
+            api.CmdSetStencilOp(
+                CommandBuffer,
+                StencilFaceFlags.FaceBackBit,
+                _newState.StencilBackFailOp,
+                _newState.StencilBackPassOp,
+                _newState.StencilBackDepthFailOp,
+                _newState.StencilBackCompareOp);
+
+            _extendedDynamicStateApplied = key;
+            _extendedDynamicStateValid = true;
         }
 
         private bool CreatePipeline(PipelineBindPoint pbp)
@@ -1792,6 +2726,23 @@ namespace Ryujinx.Graphics.Vulkan
                 }
 
                 ulong pipelineHandle = pipeline.GetUnsafe().Value.Handle;
+
+                if (pbp == PipelineBindPoint.Graphics)
+                {
+                    ulong calls = ++_graphicsPipelineLookupCalls;
+
+                    if (_currentPipelineHandle == pipelineHandle)
+                    {
+                        _graphicsPipelineSameHandle++;
+                    }
+
+                    if ((calls & 0x3ffff) == 0)
+                    {
+                        Logger.Info?.Print(
+                            LogClass.Gpu,
+                            $"[NEOV2-PIPELINE-REUSE1] calls={calls} sameHandle={_graphicsPipelineSameHandle}");
+                    }
+                }
 
                 if (_currentPipelineHandle != pipelineHandle)
                 {
@@ -1948,7 +2899,39 @@ namespace Ryujinx.Graphics.Vulkan
 
             if (RenderPassActive)
             {
-                FramebufferParams.AddStoreOpUsage();
+                // TOTK-STORE-COMMIT-TRACE3
+                FramebufferParams.AddStoreOpUsage((view, role, generation) =>
+                {
+                    if (!_totkProducerTrace || view?.Storage == null)
+                    {
+                        return;
+                    }
+
+                    string storageFormat = view.Storage.VkFormat.ToString();
+                    int storageWidth = view.Storage.Info.Width;
+                    int storageHeight = view.Storage.Info.Height;
+                    int storageLayers = view.Storage.Info.GetDepthOrLayers();
+
+                    bool lowResB10 =
+                        storageFormat == "B10G11R11UfloatPack32" &&
+                        (((storageWidth == 320) && (storageHeight == 180)) ||
+                         ((storageWidth == 400) && (storageHeight == 225))) &&
+                        storageLayers >= 2;
+
+                    if (!lowResB10)
+                    {
+                        return;
+                    }
+
+                    int storageId =
+                        System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(view.Storage);
+
+                    string hash = _program?.FragmentShaderHash ?? "<none>";
+
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"[TOTK-STORE-COMMIT3] HASH={hash} DRAW={DrawCount} ATT={role} S={storageId:X} G={generation} VF={view.VkFormat}:{view.Width}x{view.Height}:L{view.Layers}:FL{view.FirstLayer}:FM{view.FirstLevel} SF={storageFormat}:{storageWidth}x{storageHeight}:L{storageLayers}");
+                });
 
                 PauseTransformFeedbackInternal();
                 Gd.Api.CmdEndRenderPass(CommandBuffer);

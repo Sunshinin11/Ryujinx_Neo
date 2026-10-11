@@ -48,20 +48,9 @@ namespace Ryujinx.HLE
             FileSystem = Configuration.VirtualFileSystem;
             UIHandler = Configuration.HostUIHandler;
 
-            // NEOV2-NCEMIRROR1: NCE maps views of the guest memory, so it needs mirrorable (shared) memory even
-            // when the "safe" memory manager (SoftwarePageTable) is selected. Without this, NCE + safe memory manager
-            // crashed at process start with "The source memory block is not mirrorable".
-            bool mirrorable = configuration.MemoryManagerMode != MemoryManagerMode.SoftwarePageTable || configuration.UseHypervisor;
-
-            if (configuration.MemoryManagerMode == MemoryManagerMode.SoftwarePageTable && configuration.UseHypervisor)
-            {
-                Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Cpu,
-                    "[NEOV2-NCEMIRROR1] NCE with the safe memory manager: guest memory allocated as mirrorable.");
-            }
-
-            MemoryAllocationFlags memoryAllocationFlags = mirrorable
-                ? MemoryAllocationFlags.Reserve | MemoryAllocationFlags.Mirrorable
-                : MemoryAllocationFlags.Reserve;
+            MemoryAllocationFlags memoryAllocationFlags = configuration.MemoryManagerMode == MemoryManagerMode.SoftwarePageTable
+                ? MemoryAllocationFlags.Reserve
+                : MemoryAllocationFlags.Reserve | MemoryAllocationFlags.Mirrorable;
 
 #pragma warning disable IDE0055 // Disable formatting
             AudioDeviceDriver = new CompatLayerHardwareDeviceDriver(Configuration.AudioDeviceDriver);

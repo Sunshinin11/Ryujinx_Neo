@@ -105,8 +105,6 @@ namespace Ryujinx.Graphics.Nvdec.Image
         {
             OffsetCalculator calc = new(width, height, 0, false, 2, 2);
 
-            // NEOV2-VP9SIMD2: no ARM64 usa o mesmo caminho vetorial do x86 (ZIP1/ZIP2 no lugar de
-            // PUNPCKLBW/PUNPCKHBW). O resultado e identico; antes o ARM caia no laco byte a byte.
             if (Sse2.IsSupported || AdvSimd.Arm64.IsSupported)
             {
                 int strideTrunc64 = BitUtils.AlignDown(width * 2, 64);
@@ -176,17 +174,25 @@ namespace Ryujinx.Graphics.Nvdec.Image
                 }
             }
         }
-
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static Vector128<byte> InterleaveLow(Vector128<byte> u, Vector128<byte> v)
+        private static Vector128<byte> InterleaveLow(
+            Vector128<byte> u,
+            Vector128<byte> v)
         {
-            return Sse2.IsSupported ? Sse2.UnpackLow(u, v) : AdvSimd.Arm64.ZipLow(u, v);
+            return Sse2.IsSupported
+                ? Sse2.UnpackLow(u, v)
+                : AdvSimd.Arm64.ZipLow(u, v);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static Vector128<byte> InterleaveHigh(Vector128<byte> u, Vector128<byte> v)
+        private static Vector128<byte> InterleaveHigh(
+            Vector128<byte> u,
+            Vector128<byte> v)
         {
-            return Sse2.IsSupported ? Sse2.UnpackHigh(u, v) : AdvSimd.Arm64.ZipHigh(u, v);
+            return Sse2.IsSupported
+                ? Sse2.UnpackHigh(u, v)
+                : AdvSimd.Arm64.ZipHigh(u, v);
         }
+
     }
 }

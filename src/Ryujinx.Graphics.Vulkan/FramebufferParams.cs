@@ -478,20 +478,38 @@ namespace Ryujinx.Graphics.Vulkan
             gd.Barriers.Flush(cbs, false, null, null);
         }
 
-        public void AddStoreOpUsage()
+        // TOTK-STORE-COMMIT3
+        public void AddStoreOpUsage(Action<TextureView, string, long> storeTrace = null)
         {
             if (_colors != null)
             {
                 int count = ColorAttachmentsCount;
-                
+
                 for (int i = 0; i < count; i++)
                 {
                     TextureView color = _colors[i];
-                    color.Storage?.AddStoreOpUsage(false);
+
+                    if (color?.Storage != null)
+                    {
+                        color.Storage.AddStoreOpUsage(false);
+
+                        storeTrace?.Invoke(
+                            color,
+                            "C" + AttachmentIndices[i],
+                            color.Storage.TotkWriteGeneration);
+                    }
                 }
             }
 
-            _depthStencil?.Storage?.AddStoreOpUsage(true);
+            if (_depthStencil?.Storage != null)
+            {
+                _depthStencil.Storage.AddStoreOpUsage(true);
+
+                storeTrace?.Invoke(
+                    _depthStencil,
+                    "DS",
+                    _depthStencil.Storage.TotkWriteGeneration);
+            }
         }
 
         public void ClearBindings()

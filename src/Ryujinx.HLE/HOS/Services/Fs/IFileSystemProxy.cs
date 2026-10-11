@@ -360,9 +360,21 @@ namespace Ryujinx.HLE.HOS.Services.Fs
         {
             SaveDataSpaceId spaceId = (SaveDataSpaceId)context.RequestData.ReadInt64();
             SaveDataAttribute attribute = context.RequestData.ReadStruct<SaveDataAttribute>();
+            // GALAXY-SAVEATTR-DIAG21
+            Logger.Error?.Print(
+                LogClass.ServiceFs,
+                $"[GALAXY-SAVEATTR] space={spaceId} program=0x{attribute.ProgramId.Value:X16} user={attribute.UserId} static=0x{attribute.StaticSaveDataId:X16} type={attribute.Type} rank={attribute.Rank} index={attribute.Index}");
+
             using SharedRef<IFileSystem> fileSystem = new();
 
             Result result = _baseFileSystemProxy.Get.OpenSaveDataFileSystem(ref fileSystem.Ref, spaceId, in attribute);
+            if (result.IsFailure())
+            {
+                Logger.Error?.Print(
+                    LogClass.ServiceFs,
+                    $"[GALAXY-SAVEATTR] OPEN FAILED result=0x{result.Value:X8}");
+            }
+
             if (result.IsFailure())
             {
                 return (ResultCode)result.Value;

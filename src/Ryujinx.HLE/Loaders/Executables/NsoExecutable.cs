@@ -4,9 +4,6 @@ using LibHac.Loader;
 using LibHac.Tools.FsSystem;
 using Ryujinx.Common.Logging;
 using System;
-using System.Buffers.Binary;
-using System.IO;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -14,11 +11,6 @@ namespace Ryujinx.HLE.Loaders.Executables
 {
     partial class NsoExecutable : IExecutable
     {
-        // NEOV2-ZBIC1: SDK 22+ NSOs may set NsoFlags_UseZbicCompression (bit 7). Their segments are
-        // ZBIC (Zstandard variant) instead of LZ4, which LibHac's NsoReader cannot decode.
-        private const int NsoHeaderSize = 0x100;
-        private const uint FlagUseZbicCompression = 1u << 7;
-
         public byte[] Program { get; }
         public Span<byte> Text => Program.AsSpan((int)TextOffset, (int)TextSize);
         public Span<byte> Ro => Program.AsSpan((int)RoOffset, (int)RoSize);
@@ -59,25 +51,9 @@ namespace Ryujinx.HLE.Loaders.Executables
 
             Program = new byte[DataOffset + uncompressedSize];
 
-            byte[] rawHeader = new byte[NsoHeaderSize];
-            inStorage.Read(0, rawHeader).ThrowIfFailure();
-
-            uint flags = BinaryPrimitives.ReadUInt32LittleEndian(rawHeader.AsSpan(0x0C));
-
-            if ((flags & FlagUseZbicCompression) != 0)
-            {
-                TextSize = DecompressZbicSection(inStorage, reader, rawHeader, flags, NsoReader.SegmentType.Text, 0, TextOffset, name);
-                RoSize = DecompressZbicSection(inStorage, reader, rawHeader, flags, NsoReader.SegmentType.Ro, 1, RoOffset, name);
-                DataSize = DecompressZbicSection(inStorage, reader, rawHeader, flags, NsoReader.SegmentType.Data, 2, DataOffset, name);
-
-                Logger.Notice.Print(LogClass.Loader, $"[NEOV2-ZBIC1] {name}: ZBIC NSO decoded (flags=0x{flags:X2}, text=0x{TextSize:X}, ro=0x{RoSize:X}, data=0x{DataSize:X})");
-            }
-            else
-            {
-                TextSize = DecompressSection(reader, NsoReader.SegmentType.Text, TextOffset);
-                RoSize = DecompressSection(reader, NsoReader.SegmentType.Ro, RoOffset);
-                DataSize = DecompressSection(reader, NsoReader.SegmentType.Data, DataOffset);
-            }
+            TextSize = DecompressSection(reader, NsoReader.SegmentType.Text, TextOffset);
+            RoSize = DecompressSection(reader, NsoReader.SegmentType.Ro, RoOffset);
+            DataSize = DecompressSection(reader, NsoReader.SegmentType.Data, DataOffset);
 
             Name = name;
             BuildId = reader.Header.ModuleId;
@@ -92,54 +68,6 @@ namespace Ryujinx.HLE.Loaders.Executables
             Span<byte> span = Program.AsSpan((int)offset, (int)uncompressedSize);
 
             reader.ReadSegment(segmentType, span).ThrowIfFailure();
-
-            return uncompressedSize;
-        }
-
-        private uint DecompressZbicSection(IStorage storage, NsoReader reader, byte[] header, uint flags, NsoReader.SegmentType segmentType, int segment, uint offset, string name)
-        {
-
-            reader.GetSegmentSize(segmentType, out uint uncompressedSize).ThrowIfFailure();
-
-            uint fileOffset = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(0x10 + segment * 0x10));
-            uint compressedSize = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(0x60 + segment * 4));
-            bool isCompressed = (flags & (1u << segment)) != 0;
-            bool checkHash = (flags & (8u << segment)) != 0;
-
-            Span<byte> span = Program.AsSpan((int)offset, (int)uncompressedSize);
-
-            if (!isCompressed)
-            {
-                storage.Read(fileOffset, span).ThrowIfFailure();
-            }
-            else
-            {
-                byte[] compressed = new byte[compressedSize];
-
-                storage.Read(fileOffset, compressed).ThrowIfFailure();
-
-                if (!ZstdBicDecoder.IsSupportedFrame(compressed))
-                {
-                    throw new InvalidDataException($"[NEOV2-ZBIC1] {name}: segment {segmentType} is flagged ZBIC but has no ZBIC/zstd frame");
-                }
-
-                int written = ZstdBicDecoder.Decompress(compressed, span);
-
-                if (written != span.Length)
-                {
-                    throw new InvalidDataException($"[NEOV2-ZBIC1] {name}: segment {segmentType} decoded 0x{written:X} bytes, expected 0x{span.Length:X}");
-                }
-            }
-
-            if (checkHash)
-            {
-                byte[] hash = SHA256.HashData(span);
-
-                if (!hash.AsSpan().SequenceEqual(header.AsSpan(0xA0 + segment * 0x20, 0x20)))
-                {
-                    throw new InvalidDataException($"[NEOV2-ZBIC1] {name}: segment {segmentType} hash mismatch after ZBIC decode");
-                }
-            }
 
             return uncompressedSize;
         }

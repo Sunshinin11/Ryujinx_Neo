@@ -1,14 +1,31 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.Common.Memory;
 using Silk.NET.Vulkan;
 using System;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Threading;
+using GraphicsCompatibility = Ryujinx.Graphics.GAL.GraphicsCompatibility;
+using Mua3ShaderIdentity = Ryujinx.Graphics.GAL.Mua3ShaderIdentity;
 
 namespace Ryujinx.Graphics.Vulkan
 {
     struct PipelineState : IDisposable
     {
-        private const int MaxDynamicStatesCount = 9;
+        private const int MaxDynamicStatesCount = 16;
+
+        // NEOV2 Etapa 23: bits of Id6 that become dynamic state (EXT_extended_dynamic_state) on Turnip.
+        // DepthCompareOp, stencil front/back ops, CullMode (bits 24-52), FrontFace (56),
+        // DepthTestEnable (58), DepthWriteEnable (59) and StencilTestEnable (61).
+        public const ulong ExtendedDynamicStateMask =
+            (((1UL << 29) - 1UL) << 24) | (1UL << 56) | (1UL << 58) | (1UL << 59) | (1UL << 61);
+
+        private static int _extendedDynamicStateLogged;
+
+        public static bool UsesExtendedDynamicState(VulkanRenderer gd)
+        {
+            return gd.IsTurnip && gd.Capabilities.SupportsExtendedDynamicState && gd.ExtendedDynamicStateApi != null;
+        }
 
         private static readonly Lock _pipelineCreateLock = new();
 
@@ -348,6 +365,13 @@ namespace Ryujinx.Graphics.Vulkan
                 Layout = PipelineLayout,
             };
 
+            bool captureMua3Statistics = GraphicsCompatibility.IsMua3 && gd.PipelineExecutablePropertiesApi != null;
+
+            if (captureMua3Statistics)
+            {
+                pipelineCreateInfo.Flags |= PipelineCreateFlags.CreateCaptureStatisticsBitKhr;
+            }
+
             Pipeline pipelineHandle = default;
 
             bool hasSpec = program.SpecDescriptions != null;
@@ -387,6 +411,11 @@ namespace Ryujinx.Graphics.Vulkan
                 PipelineCachePersistence.RecordPipelineCreated();
             }
 
+            if (captureMua3Statistics)
+            {
+                LogMua3ComputePipelineStatistics(gd, device, pipelineHandle, program);
+            }
+
             pipeline = new Auto<DisposablePipeline>(new DisposablePipeline(gd.Api, device, pipelineHandle));
 
             program.AddComputePipeline(ref SpecializationData, pipeline);
@@ -394,13 +423,159 @@ namespace Ryujinx.Graphics.Vulkan
             return pipeline;
         }
 
-        public unsafe Auto<DisposablePipeline> CreateGraphicsPipeline(
+        private static unsafe void LogMua3ComputePipelineStatistics(
+            VulkanRenderer gd,
+            Device device,
+            Pipeline pipeline,
+            ShaderCollection program)
+        {
+            if (!GraphicsCompatibility.TryGetMua3Program(program, out Mua3ShaderIdentity identity))
+            {
+                return;
+            }
+
+            PipelineInfoKHR pipelineInfo = new()
+            {
+                SType = StructureType.PipelineInfoKhr,
+                Pipeline = pipeline,
+            };
+
+            uint executableCount = 0;
+            Result result = gd.PipelineExecutablePropertiesApi.GetPipelineExecutableProperties(
+                device,
+                &pipelineInfo,
+                &executableCount,
+                null);
+
+            if (result != Result.Success || executableCount == 0)
+            {
+                Logger.Warning?.Print(LogClass.Gpu, $"[MUA3-PIPELINE] Unable to query compute executable properties result={result} shaders=[{identity}]");
+                return;
+            }
+
+            PipelineExecutablePropertiesKHR* properties = stackalloc PipelineExecutablePropertiesKHR[(int)executableCount];
+
+            for (int i = 0; i < executableCount; i++)
+            {
+                properties[i].SType = StructureType.PipelineExecutablePropertiesKhr;
+            }
+
+            result = gd.PipelineExecutablePropertiesApi.GetPipelineExecutableProperties(
+                device,
+                &pipelineInfo,
+                &executableCount,
+                properties);
+
+            if (result != Result.Success)
+            {
+                Logger.Warning?.Print(LogClass.Gpu, $"[MUA3-PIPELINE] Unable to read compute executable properties result={result} shaders=[{identity}]");
+                return;
+            }
+
+            for (uint executableIndex = 0; executableIndex < executableCount; executableIndex++)
+            {
+                PipelineExecutableInfoKHR executableInfo = new()
+                {
+                    SType = StructureType.PipelineExecutableInfoKhr,
+                    Pipeline = pipeline,
+                    ExecutableIndex = executableIndex,
+                };
+
+                uint statisticCount = 0;
+                result = gd.PipelineExecutablePropertiesApi.GetPipelineExecutableStatistic(
+                    device,
+                    &executableInfo,
+                    &statisticCount,
+                    null);
+
+                if (result != Result.Success || statisticCount == 0)
+                {
+                    continue;
+                }
+
+                PipelineExecutableStatisticKHR* statistics = stackalloc PipelineExecutableStatisticKHR[(int)statisticCount];
+
+                for (int i = 0; i < statisticCount; i++)
+                {
+                    statistics[i].SType = StructureType.PipelineExecutableStatisticKhr;
+                }
+
+                result = gd.PipelineExecutablePropertiesApi.GetPipelineExecutableStatistic(
+                    device,
+                    &executableInfo,
+                    &statisticCount,
+                    statistics);
+
+                if (result != Result.Success)
+                {
+                    continue;
+                }
+
+                byte* executableNamePointer = properties[executableIndex].Name;
+                string executableName = Marshal.PtrToStringAnsi((nint)executableNamePointer) ?? "unknown";
+
+                for (uint statisticIndex = 0; statisticIndex < statisticCount; statisticIndex++)
+                {
+                    PipelineExecutableStatisticKHR statistic = statistics[statisticIndex];
+                    byte* statisticNamePointer = statistic.Name;
+                    string statisticName = Marshal.PtrToStringAnsi((nint)statisticNamePointer) ?? "unknown";
+
+                    string value = statistic.Format switch
+                    {
+                        PipelineExecutableStatisticFormatKHR.Bool32Khr => statistic.Value.B32.ToString(),
+                        PipelineExecutableStatisticFormatKHR.Int64Khr => statistic.Value.I64.ToString(),
+                        PipelineExecutableStatisticFormatKHR.Uint64Khr => statistic.Value.U64.ToString(),
+                        PipelineExecutableStatisticFormatKHR.Float64Khr => statistic.Value.F64.ToString("R"),
+                        _ => "unknown",
+                    };
+
+                    Logger.Info?.Print(
+                        LogClass.Gpu,
+                        $"[MUA3-PIPELINE] shaders=[{identity}] pipeline=0x{pipeline.Handle:X} executable={executableIndex}:{executableName} statistic={statisticName} value={value}");
+                }
+            }
+        }
+
+        public Auto<DisposablePipeline> CreateGraphicsPipeline(
             VulkanRenderer gd,
             Device device,
             ShaderCollection program,
             PipelineCache cache,
             RenderPass renderPass,
             bool throwOnError = false)
+        {
+            if (!UsesExtendedDynamicState(gd))
+            {
+                return CreateGraphicsPipelineCore(gd, device, program, cache, renderPass, throwOnError, false);
+            }
+
+            if (Interlocked.Exchange(ref _extendedDynamicStateLogged, 1) == 0)
+            {
+                Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, "[NEOV2-ETAPA23] Extended dynamic state (cull, front face, depth, stencil) enabled for graphics pipelines (Turnip)");
+            }
+
+            // The dynamic fields are cleared from the key, so states that differ only in them share one pipeline.
+            ulong id6 = Internal.Id6;
+            Internal.Id6 = id6 & ~ExtendedDynamicStateMask;
+
+            try
+            {
+                return CreateGraphicsPipelineCore(gd, device, program, cache, renderPass, throwOnError, true);
+            }
+            finally
+            {
+                Internal.Id6 = id6;
+            }
+        }
+
+        private unsafe Auto<DisposablePipeline> CreateGraphicsPipelineCore(
+            VulkanRenderer gd,
+            Device device,
+            ShaderCollection program,
+            PipelineCache cache,
+            RenderPass renderPass,
+            bool throwOnError,
+            bool extendedDynamicState)
         {
             if (program.TryGetGraphicsPipeline(ref Internal, out Auto<DisposablePipeline> pipeline))
             {
@@ -609,6 +784,17 @@ namespace Ryujinx.Graphics.Vulkan
                     dynamicStates[dynamicStatesCount++] = DynamicState.AttachmentFeedbackLoopEnableExt;
                 }
 
+                if (extendedDynamicState)
+                {
+                    dynamicStates[dynamicStatesCount++] = DynamicState.CullModeExt;
+                    dynamicStates[dynamicStatesCount++] = DynamicState.FrontFaceExt;
+                    dynamicStates[dynamicStatesCount++] = DynamicState.DepthTestEnableExt;
+                    dynamicStates[dynamicStatesCount++] = DynamicState.DepthWriteEnableExt;
+                    dynamicStates[dynamicStatesCount++] = DynamicState.DepthCompareOpExt;
+                    dynamicStates[dynamicStatesCount++] = DynamicState.StencilTestEnableExt;
+                    dynamicStates[dynamicStatesCount++] = DynamicState.StencilOpExt;
+                }
+
                 PipelineDynamicStateCreateInfo pipelineDynamicStateCreateInfo = new()
                 {
                     SType = StructureType.PipelineDynamicStateCreateInfo,
@@ -660,12 +846,12 @@ namespace Ryujinx.Graphics.Vulkan
                 {
                     lock (_pipelineCreateLock)
                     {
-                        result = gd.Api.CreateGraphicsPipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle);
+                        long neoHitchT0 = System.Diagnostics.Stopwatch.GetTimestamp(); result = gd.Api.CreateGraphicsPipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle); if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddGraphicsPipeline(neoHitchT0);
                     }
                 }
                 else
                 {
-                    result = gd.Api.CreateGraphicsPipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle);
+                    long neoHitchT0 = System.Diagnostics.Stopwatch.GetTimestamp(); result = gd.Api.CreateGraphicsPipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle); if (Ryujinx.Common.Diagnostics.NeoHitchStats.Enabled) Ryujinx.Common.Diagnostics.NeoHitchStats.AddGraphicsPipeline(neoHitchT0);
                 }
 
                 if (throwOnError)

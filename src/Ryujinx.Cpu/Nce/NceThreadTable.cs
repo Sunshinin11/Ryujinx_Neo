@@ -6,7 +6,7 @@ namespace Ryujinx.Cpu.Nce
 {
     static class NceThreadTable
     {
-        private const int MaxThreads = 4096;
+        internal const int MaxThreads = 4096;
 
         private struct Entry
         {

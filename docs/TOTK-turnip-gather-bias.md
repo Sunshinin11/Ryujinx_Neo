@@ -87,7 +87,7 @@ retraduzir quando `CodeGenVersion` não muda. Por isso esta correção também i
   `SubTexelPrecisionBits` também com Turnip (`IsTurnip`). A variável de ambiente
   `RYUJINX_TOTK_TURNIP_GATHER_BIAS=0` desliga o bias (para teste A/B).
 - `src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs`:
-  `CodeGenVersion` 7360 → 7361, para invalidar o cache de shaders do host.
+  `CodeGenVersion` 7357 → 7358, para invalidar o cache de shaders do host.
 
 ## Impacto
 

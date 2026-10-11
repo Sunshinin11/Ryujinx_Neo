@@ -123,6 +123,7 @@ namespace Ryujinx.Graphics.Vulkan
             }
 
             Logger.Info?.Print(LogClass.Gpu, $"[NEOV2-ETAPA6] Pipeline cache loaded: {loadedBytes / 1024} KiB ({path ?? "no path"})");
+            Logger.Info?.Print(LogClass.Gpu, "[NEOV2-PIPELINE-EXIT1] Periodic in-game pipeline cache saves disabled; cache will be saved on renderer shutdown.");
 
             return cache;
         }

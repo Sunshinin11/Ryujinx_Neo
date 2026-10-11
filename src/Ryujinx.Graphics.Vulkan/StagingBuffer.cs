@@ -26,10 +26,9 @@ namespace Ryujinx.Graphics.Vulkan
         private const int BufferSize = 32 * 1024 * 1024;
 
         private int _freeOffset;
-                private int _freeSize;
+        private int _freeSize;
         private readonly object _sync = new();
 
-        // Opcao "Otimizacoes de GPU": desligada, o StagingBuffer volta a rodar sem a trava.
         private readonly bool _useLock = Ryujinx.Common.Diagnostics.NeoGraphicsSettings.StagingBufferLockEnabled;
 
         private bool EnterSync()
@@ -109,7 +108,8 @@ namespace Ryujinx.Graphics.Vulkan
                 {
                     if (_freeSize < 0)
                     {
-                        throw new InvalidOperationException($"Staging buffer accounting invalid: freeSize={_freeSize}, freeOffset={_freeOffset}, pending={_pendingCopies.Count}.");
+                        throw new InvalidOperationException(
+                            $"Staging buffer accounting invalid: freeSize={_freeSize}, freeOffset={_freeOffset}, pending={_pendingCopies.Count}.");
                     }
 
                     if (!WaitFreeCompleted(cbp))

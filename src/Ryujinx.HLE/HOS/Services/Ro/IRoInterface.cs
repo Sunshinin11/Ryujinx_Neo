@@ -1,8 +1,6 @@
 using LibHac.Tools.FsSystem;
 using Ryujinx.Common;
 using Ryujinx.Cpu;
-using Ryujinx.Cpu.Nce;
-using Ryujinx.Common.Logging;
 using Ryujinx.HLE.HOS.Kernel.Memory;
 using Ryujinx.HLE.HOS.Kernel.Process;
 using Ryujinx.HLE.Loaders.Executables;
@@ -30,7 +28,6 @@ namespace Ryujinx.HLE.HOS.Services.Ro
 
         private readonly List<NrrInfo> _nrrInfos;
         private readonly List<NroInfo> _nroInfos;
-        private readonly List<NroNceMapping> _failedNceMappings = new();
 
         private KProcess _owner;
         private IVirtualMemoryManager _ownerMm;
@@ -369,12 +366,6 @@ namespace Ryujinx.HLE.HOS.Services.Ro
             {
                 if (info.NroMappedAddress == nroMappedAddress)
                 {
-                    if (info.NceMapping != null)
-                    {
-                        ResultCode result = info.NceMapping.Unload();
-                        if (result == ResultCode.Success) _nroInfos.Remove(info);
-                        return result;
-                    }
                     _nroInfos.Remove(info);
 
                     return UnmapNroFromInfo(info);
@@ -386,8 +377,6 @@ namespace Ryujinx.HLE.HOS.Services.Ro
 
         private ResultCode UnmapNroFromInfo(NroInfo info)
         {
-            if (info.NceMapping != null) return info.NceMapping.Unload();
-
             ulong textSize = (ulong)info.Executable.Text.Length;
             ulong roSize = (ulong)info.Executable.Ro.Length;
             ulong dataSize = (ulong)info.Executable.Data.Length;
@@ -455,33 +444,6 @@ namespace Ryujinx.HLE.HOS.Services.Ro
 
                 if (result == ResultCode.Success)
                 {
-                    if (PlatformInfo.IsBionic && _owner.CpuMemory is MemoryManagerNative)
-                    {
-                        // The memory manager identifies the engine actually selected for this process.
-                        RetryFailedNceMappings();
-                        info.NceMapping = new NroNceMapping(_owner, info);
-                        try
-                        {
-                            result = info.NceMapping.Load(out nroMappedAddress);
-                        }
-                        catch
-                        {
-                            if (!info.NceMapping.IsReleased) _failedNceMappings.Add(info.NceMapping);
-                            throw;
-                        }
-                        if (result == ResultCode.Success)
-                        {
-                            info.NroMappedAddress = nroMappedAddress;
-                            _nroInfos.Add(info);
-                        }
-                        else if (!info.NceMapping.IsReleased)
-                        {
-                            _failedNceMappings.Add(info.NceMapping);
-                        }
-                        context.ResponseData.Write(nroMappedAddress);
-                        return result;
-                    }
-
                     result = MapNro(_owner, info, out nroMappedAddress);
 
                     if (result == ResultCode.Success)
@@ -614,31 +576,16 @@ namespace Ryujinx.HLE.HOS.Services.Ro
             return LoadNrr(context);
         }
 
-        private void RetryFailedNceMappings()
-        {
-            for (int i = _failedNceMappings.Count - 1; i >= 0; i--)
-            {
-                ResultCode result = _failedNceMappings[i].Unload();
-                if (result == ResultCode.Success) _failedNceMappings.RemoveAt(i);
-                else Logger.Warning?.Print(LogClass.Cpu, $"[NEO-NCE-R13] failed-load cleanup result={result}");
-            }
-        }
-
         protected override void Dispose(bool isDisposing)
         {
             if (isDisposing)
             {
                 foreach (NroInfo info in _nroInfos)
                 {
-                    ResultCode result = UnmapNroFromInfo(info);
-                    if (info.NceMapping != null && result != ResultCode.Success)
-                        _failedNceMappings.Add(info.NceMapping);
+                    UnmapNroFromInfo(info);
                 }
 
                 _nroInfos.Clear();
-
-                RetryFailedNceMappings();
-                _failedNceMappings.Clear();
 
                 if (_ownerMm is IRefCounted rc)
                 {

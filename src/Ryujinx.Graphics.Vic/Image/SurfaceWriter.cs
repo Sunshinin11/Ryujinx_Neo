@@ -11,8 +11,102 @@ namespace Ryujinx.Graphics.Vic.Image
 {
     class SurfaceWriter
     {
+        // GALAXY-VIC-DIAG15
+        private static int _galaxyVicWriteCount;
+        private static int _galaxyVicTargetCount;
         public static void Write(ResourceManager rm, Surface input, ref OutputSurfaceConfig config, ref PlaneOffsets offsets)
         {
+            // GALAXY-VIC-DIAG15
+            int galaxyVicN = ++_galaxyVicWriteCount;
+            ulong galaxyOutAddr = ExtendOffset(offsets.LumaOffset);
+            bool galaxyExactTarget = galaxyOutAddr == 0x1CF970000UL;
+
+            int galaxyTargetN = 0;
+            if (galaxyExactTarget)
+            {
+                galaxyTargetN = ++_galaxyVicTargetCount;
+            }
+
+            bool galaxyVicSample =
+                galaxyExactTarget ||
+                galaxyVicN <= 20 ||
+                galaxyVicN == 60 ||
+                galaxyVicN == 120 ||
+                galaxyVicN == 300 ||
+                galaxyVicN == 600 ||
+                galaxyVicN == 1200;
+
+            string galaxySurfaceSample = "";
+
+            if (galaxyVicSample)
+            {
+                try
+                {
+                    int galaxyPixels = input.Width * input.Height;
+                    int galaxySamples = Math.Min(4096, galaxyPixels);
+
+                    int galaxyRgbZero = 0;
+                    int galaxyRgbNonZero = 0;
+                    int galaxyAlphaZero = 0;
+                    int galaxyAlphaNonZero = 0;
+
+                    ulong galaxyHash = 1469598103934665603UL;
+
+                    for (int i = 0; i < galaxySamples; i++)
+                    {
+                        int pixel = galaxySamples <= 1
+                            ? 0
+                            : (int)((long)i * (galaxyPixels - 1) / (galaxySamples - 1));
+
+                        int y = pixel / input.Width;
+                        int x = pixel - y * input.Width;
+
+                        ushort r = input.GetR(x, y);
+                        ushort g = input.GetG(x, y);
+                        ushort b = input.GetB(x, y);
+                        ushort a = input.GetA(x, y);
+
+                        if (r == 0 && g == 0 && b == 0)
+                        {
+                            galaxyRgbZero++;
+                        }
+                        else
+                        {
+                            galaxyRgbNonZero++;
+                        }
+
+                        if (a == 0)
+                        {
+                            galaxyAlphaZero++;
+                        }
+                        else
+                        {
+                            galaxyAlphaNonZero++;
+                        }
+
+                        galaxyHash ^= r;
+                        galaxyHash *= 1099511628211UL;
+                        galaxyHash ^= g;
+                        galaxyHash *= 1099511628211UL;
+                        galaxyHash ^= b;
+                        galaxyHash *= 1099511628211UL;
+                        galaxyHash ^= a;
+                        galaxyHash *= 1099511628211UL;
+                    }
+
+                    galaxySurfaceSample =
+                        $"surfaceSample={galaxySamples} " +
+                        $"surfaceRgb0={galaxyRgbZero} surfaceRgbNZ={galaxyRgbNonZero} " +
+                        $"surfaceA0={galaxyAlphaZero} surfaceANZ={galaxyAlphaNonZero} " +
+                        $"surfaceHash=0x{galaxyHash:X16}";
+                }
+                catch (Exception ex)
+                {
+                    galaxySurfaceSample =
+                        $"surfaceSampleError={ex.GetType().Name}:{ex.Message}";
+                }
+            }
+
             switch (config.OutPixelFormat)
             {
                 case PixelFormat.A8B8G8R8:
@@ -28,6 +122,103 @@ namespace Ryujinx.Graphics.Vic.Image
                 default:
                     Logger.Error?.Print(LogClass.Vic, $"Unsupported pixel format \"{config.OutPixelFormat}\".");
                     break;
+            }
+
+            // GALAXY-VIC-DIAG15
+            if (galaxyVicSample)
+            {
+                string galaxyGuestSample = "";
+
+                try
+                {
+                    int galaxyBpp =
+                        config.OutPixelFormat == PixelFormat.A8B8G8R8 ||
+                        config.OutPixelFormat == PixelFormat.X8B8G8R8 ||
+                        config.OutPixelFormat == PixelFormat.A8R8G8B8
+                            ? 4
+                            : 1;
+
+                    int galaxyByteCount;
+
+                    if (config.OutBlkKind == 0)
+                    {
+                        galaxyByteCount =
+                            GetPitch(input.Width, galaxyBpp) * input.Height;
+                    }
+                    else
+                    {
+                        galaxyByteCount =
+                            GetBlockLinearSize(
+                                input.Width,
+                                input.Height,
+                                galaxyBpp,
+                                1 << config.OutBlkHeight);
+                    }
+
+                    ReadOnlySpan<byte> galaxyGuest =
+                        rm.MemoryManager.GetSpan(galaxyOutAddr, galaxyByteCount);
+
+                    int galaxySamples = Math.Min(4096, galaxyGuest.Length);
+                    int galaxyZero = 0;
+                    int galaxyFF = 0;
+                    int galaxyOther = 0;
+
+                    ulong galaxyHash = 1469598103934665603UL;
+
+                    for (int i = 0; i < galaxySamples; i++)
+                    {
+                        int pos = galaxySamples <= 1
+                            ? 0
+                            : (int)((long)i * (galaxyGuest.Length - 1) / (galaxySamples - 1));
+
+                        byte value = galaxyGuest[pos];
+
+                        if (value == 0)
+                        {
+                            galaxyZero++;
+                        }
+                        else if (value == 0xff)
+                        {
+                            galaxyFF++;
+                        }
+                        else
+                        {
+                            galaxyOther++;
+                        }
+
+                        galaxyHash ^= value;
+                        galaxyHash *= 1099511628211UL;
+                    }
+
+                    string galaxyHead = galaxyGuest.Length == 0
+                        ? ""
+                        : Convert.ToHexString(
+                            galaxyGuest.Slice(0, Math.Min(32, galaxyGuest.Length)));
+
+                    galaxyGuestSample =
+                        $"guestBytes={galaxyGuest.Length} sample={galaxySamples} " +
+                        $"zero={galaxyZero} ff={galaxyFF} other={galaxyOther} " +
+                        $"guestHash=0x{galaxyHash:X16} head={galaxyHead}";
+                }
+                catch (Exception ex)
+                {
+                    galaxyGuestSample =
+                        $"guestSampleError={ex.GetType().Name}:{ex.Message}";
+                }
+
+                System.IO.File.AppendAllText(
+                    "/tmp/galaxy-vic-diag15.log",
+                    $"VIC n={galaxyVicN} target={galaxyExactTarget} targetN={galaxyTargetN} " +
+                    $"addr=0x{galaxyOutAddr:X} rawOffset=0x{offsets.LumaOffset:X} " +
+                    $"surface={input.Width}x{input.Height} " +
+                    $"cfgSurface={config.OutSurfaceWidth + 1}x{config.OutSurfaceHeight + 1} " +
+                    $"luma={config.OutLumaWidth + 1}x{config.OutLumaHeight + 1} " +
+                    $"format={config.OutPixelFormat} " +
+                    $"linear={config.OutBlkKind == 0} blkKind={config.OutBlkKind} " +
+                    $"blkHeight={config.OutBlkHeight} gobY={1 << config.OutBlkHeight} " +
+                    galaxySurfaceSample + " " +
+                    galaxyGuestSample +
+                    Environment.NewLine);
             }
         }
 

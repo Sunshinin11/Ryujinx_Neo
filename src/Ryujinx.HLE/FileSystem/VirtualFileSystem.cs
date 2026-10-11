@@ -186,7 +186,8 @@ namespace Ryujinx.HLE.FileSystem
 
         public void InitializeFsServer(LibHac.Horizon horizon, out HorizonClient fsServerClient)
         {
-            LocalFileSystem serverBaseFs = new(useUnixTimeStamps: true);
+            // SAVE-PROTECT1: preserve and recover LibHac's save-data index across abrupt exits.
+            SaveDataProtectingFileSystem serverBaseFs = new(AppDataManager.BaseDirPath);
             Result result = serverBaseFs.Initialize(AppDataManager.BaseDirPath, LocalFileSystem.PathMode.DefaultCaseSensitivity, ensurePathExists: true);
             if (result.IsFailure())
             {

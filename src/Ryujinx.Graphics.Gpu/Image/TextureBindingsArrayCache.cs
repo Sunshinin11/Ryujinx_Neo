@@ -328,73 +328,6 @@ namespace Ryujinx.Graphics.Gpu.Image
             /// Checks if the cached texture or sampler pool has been modified since the last call to this method.
             /// </summary>
             /// <returns>True if any used entries of the pool might have been modified, false otherwise</returns>
-            // NEOV2-ARRAYFB1: shader feedback state and the arrays last sent to the backend.
-            public bool UsesFeedback;
-            public int FeedbackUsed;
-            public long FeedbackCheckTicks;
-            public ITexture[] LastTextures;
-            public ISampler[] LastSamplers;
-
-            public void RecordFeedback(bool usesFeedback, int feedbackUsed)
-            {
-                UsesFeedback = usesFeedback;
-                FeedbackUsed = feedbackUsed;
-                FeedbackCheckTicks = System.Diagnostics.Stopwatch.GetTimestamp();
-            }
-
-            public bool ShouldRebuildForFeedback(bool haveFeedback, ReadOnlySpan<uint> feedback, int length)
-            {
-                if (!UsesFeedback)
-                {
-                    return false;
-                }
-
-                long now = System.Diagnostics.Stopwatch.GetTimestamp();
-
-                // Checked at most 20 times per second: the shader marks only go from 0 to 1, so a different count means new entries.
-                if (now - FeedbackCheckTicks < System.Diagnostics.Stopwatch.Frequency / 20)
-                {
-                    return false;
-                }
-
-                FeedbackCheckTicks = now;
-
-                if (!haveFeedback)
-                {
-                    return false;
-                }
-
-                int used = length - feedback[..length].Count(0u);
-
-                return used != FeedbackUsed;
-            }
-
-            // NEOV2-ARRAYMEM1: entries left empty on the last build (see TextureArrayBudget).
-            public int SkippedSparse;
-            public int SkippedBudget;
-            public long BuildTicks;
-            public int BuildMappingGeneration;
-
-            public void RecordBuild(TextureArrayBudget budget, int mappingGeneration)
-            {
-                SkippedSparse = budget.SkippedSparse;
-                SkippedBudget = budget.SkippedBudget;
-                BuildTicks = System.Diagnostics.Stopwatch.GetTimestamp();
-                BuildMappingGeneration = mappingGeneration;
-            }
-
-            public bool ShouldRetrySkipped(int mappingGeneration)
-            {
-                if (SkippedSparse + SkippedBudget == 0 ||
-                    System.Diagnostics.Stopwatch.GetTimestamp() - BuildTicks < TextureArrayBudget.RetryTicks)
-                {
-                    return false;
-                }
-
-                return (SkippedSparse != 0 && mappingGeneration != BuildMappingGeneration) ||
-                       (SkippedBudget != 0 && TextureArrayBudget.CanCreate());
-            }
-
             public bool TexturePoolModified()
             {
                 return TexturePool.WasModified(ref _texturePoolSequence);
@@ -604,13 +537,6 @@ namespace Ryujinx.Graphics.Gpu.Image
 
         private int _currentTimestamp;
 
-        // NEOV2-ARRAYMEM1
-        private readonly TextureArrayBudget _arrayBudget = new();
-
-        // NEOV2-ARRAYFB1: scratch arrays reused by pool array builds.
-        private ITexture[] _scratchTextures;
-        private ISampler[] _scratchSamplers;
-
         /// <summary>
         /// Creates a new instance of the texture bindings array cache.
         /// </summary>
@@ -708,24 +634,7 @@ namespace Ryujinx.Graphics.Gpu.Image
             bool isStore = bindingInfo.Flags.HasFlag(TextureUsageFlags.ImageStore);
             bool resScaleUnsupported = bindingInfo.Flags.HasFlag(TextureUsageFlags.ResScaleUnsupported);
 
-            int mappingGeneration = _channel.MemoryManager.MappingGeneration;
-
-            int length = (isSampler ? samplerPool.MaximumId : texturePool.MaximumId) + 1;
-            length = Math.Min(length, bindingInfo.ArrayLength);
-
-            // NEOV2-ARRAYFB1: with "Memoria de GPU estilo Eden", shaders that report the sampled pool indices
-            // only get host textures for entries they really used.
-            // Arrays in stages that cannot report (vertex, geometry...) reuse what the fragment/compute shaders reported.
-            bool edenMode = TextureArrayBudget.Enabled;
-            ReadOnlySpan<uint> feedback = default;
-            bool haveFeedback = edenMode && !isSampler && _channel.BufferManager.TryGetTextureArrayFeedback(out feedback) && feedback.Length >= length;
-            bool wantFeedback = haveFeedback || (edenMode && !isSampler && bindingInfo.Flags.HasFlag(TextureUsageFlags.ArrayFeedback));
-
-            if (!poolModified &&
-                !isNewEntry &&
-                entry.ValidateTextures() &&
-                !entry.ShouldRetrySkipped(mappingGeneration) &&
-                !entry.ShouldRebuildForFeedback(haveFeedback, feedback, length))
+            if (!poolModified && !isNewEntry && entry.ValidateTextures())
             {
                 entry.SynchronizeMemory(isStore, resScaleUnsupported);
 
@@ -746,36 +655,11 @@ namespace Ryujinx.Graphics.Gpu.Image
                 entry.Reset();
             }
 
-            // Count the used entries before reading them, so marks written during the build trigger another one later.
-            int feedbackUsed = haveFeedback ? length - feedback[..length].Count(0u) : -1;
+            int length = (isSampler ? samplerPool.MaximumId : texturePool.MaximumId) + 1;
+            length = Math.Min(length, bindingInfo.ArrayLength);
 
-            ISampler[] samplers;
-            ITexture[] textures;
-
-            if (edenMode)
-            {
-                // NEOV2-ARRAYFB1: reuse scratch arrays; the backend only receives new arrays when something changed.
-                if (_scratchTextures == null || _scratchTextures.Length != bindingInfo.ArrayLength)
-                {
-                    _scratchTextures = new ITexture[bindingInfo.ArrayLength];
-                    _scratchSamplers = new ISampler[bindingInfo.ArrayLength];
-                }
-                else
-                {
-                    Array.Clear(_scratchTextures);
-                    Array.Clear(_scratchSamplers);
-                }
-
-                textures = _scratchTextures;
-                samplers = isImage ? null : _scratchSamplers;
-            }
-            else
-            {
-                samplers = isImage ? null : new ISampler[bindingInfo.ArrayLength];
-                textures = new ITexture[bindingInfo.ArrayLength];
-            }
-
-            _arrayBudget.Begin();
+            ISampler[] samplers = isImage ? null : new ISampler[bindingInfo.ArrayLength];
+            ITexture[] textures = new ITexture[bindingInfo.ArrayLength];
 
             for (int index = 0; index < length; index++)
             {
@@ -788,9 +672,7 @@ namespace Ryujinx.Graphics.Gpu.Image
                 }
                 else
                 {
-                    bool? usedByShader = wantFeedback ? haveFeedback && feedback[index] != 0 : null;
-
-                    ref readonly TextureDescriptor descriptor = ref texturePool.GetForArrayBinding(index, bindingInfo.FormatInfo, out texture, _arrayBudget, usedByShader);
+                    ref readonly TextureDescriptor descriptor = ref texturePool.GetForBinding(index, bindingInfo.FormatInfo, out texture);
 
                     if (texture != null)
                     {
@@ -838,53 +720,6 @@ namespace Ryujinx.Graphics.Gpu.Image
                 }
             }
 
-            entry.RecordBuild(_arrayBudget, mappingGeneration);
-            entry.RecordFeedback(wantFeedback, feedbackUsed);
-
-            if (edenMode)
-            {
-                // NEOV2-ARRAYFB1: DOOM Eternal rewrites its texture pool all the time. Only update the backend array
-                // (a full descriptor set rewrite) when the bound textures really changed.
-                bool texturesChanged = entry.LastTextures == null || !SameReferences(textures, entry.LastTextures);
-                bool samplersChanged = samplers != null && (entry.LastSamplers == null || !SameReferences(samplers, entry.LastSamplers));
-
-                if (texturesChanged)
-                {
-                    entry.LastTextures = (ITexture[])textures.Clone();
-                }
-
-                if (samplersChanged)
-                {
-                    entry.LastSamplers = (ISampler[])samplers.Clone();
-                }
-
-                if (isImage)
-                {
-                    if (texturesChanged)
-                    {
-                        entry.ImageArray.SetImages(0, entry.LastTextures);
-                    }
-
-                    SetImageArray(stage, bindingInfo, entry.ImageArray);
-                }
-                else
-                {
-                    if (samplersChanged)
-                    {
-                        entry.TextureArray.SetSamplers(0, entry.LastSamplers);
-                    }
-
-                    if (texturesChanged)
-                    {
-                        entry.TextureArray.SetTextures(0, entry.LastTextures);
-                    }
-
-                    SetTextureArray(stage, bindingInfo, entry.TextureArray);
-                }
-
-                return;
-            }
-
             if (isImage)
             {
                 entry.ImageArray.SetImages(0, textures);
@@ -898,27 +733,6 @@ namespace Ryujinx.Graphics.Gpu.Image
 
                 SetTextureArray(stage, bindingInfo, entry.TextureArray);
             }
-        }
-
-        /// <summary>
-        /// NEOV2-ARRAYFB1: checks if two arrays hold the same object references.
-        /// </summary>
-        private static bool SameReferences<T>(T[] a, T[] b) where T : class
-        {
-            if (a.Length != b.Length)
-            {
-                return false;
-            }
-
-            for (int i = 0; i < a.Length; i++)
-            {
-                if (!ReferenceEquals(a[i], b[i]))
-                {
-                    return false;
-                }
-            }
-
-            return true;
         }
 
         /// <summary>
@@ -965,9 +779,7 @@ namespace Ryujinx.Graphics.Gpu.Image
             ReadOnlySpan<int> cachedTextureBuffer;
             ReadOnlySpan<int> cachedSamplerBuffer;
 
-            int mappingGeneration = _channel.MemoryManager.MappingGeneration;
-
-            if (!poolsModified && !isNewEntry && entry.ValidateTextures() && !entry.ShouldRetrySkipped(mappingGeneration))
+            if (!poolsModified && !isNewEntry && entry.ValidateTextures())
             {
                 if (entry.MatchesSequenceNumber(_context.SequenceNumber))
                 {
@@ -1038,8 +850,6 @@ namespace Ryujinx.Graphics.Gpu.Image
             ISampler[] samplers = isImage ? null : new ISampler[bindingInfo.ArrayLength];
             ITexture[] textures = new ITexture[bindingInfo.ArrayLength];
 
-            _arrayBudget.Begin();
-
             for (int index = 0; index < bindingInfo.ArrayLength; index++)
             {
                 int handleIndex = bindingInfo.Handle + index * (Constants.TextureHandleSizeInBytes / sizeof(int));
@@ -1056,7 +866,7 @@ namespace Ryujinx.Graphics.Gpu.Image
                     samplerId = TextureHandle.UnpackSamplerId(packedId);
                 }
 
-                ref readonly TextureDescriptor descriptor = ref texturePool.GetForArrayBinding(textureId, bindingInfo.FormatInfo, out Texture texture, _arrayBudget);
+                ref readonly TextureDescriptor descriptor = ref texturePool.GetForBinding(textureId, bindingInfo.FormatInfo, out Texture texture);
 
                 if (texture != null)
                 {
@@ -1113,8 +923,6 @@ namespace Ryujinx.Graphics.Gpu.Image
                     textures[index] = hostTexture;
                 }
             }
-
-            entry.RecordBuild(_arrayBudget, mappingGeneration);
 
             if (isImage)
             {

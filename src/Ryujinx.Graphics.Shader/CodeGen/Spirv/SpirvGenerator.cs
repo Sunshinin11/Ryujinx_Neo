@@ -16,26 +16,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
     static class SpirvGenerator
     {
+        private static readonly bool _lrzScan = System.Environment.GetEnvironmentVariable("RYUJINX_NEO_LRZ_SCAN") == "1";
+
         // NEOV2: prevent a malformed guest shader from keeping the host GPU in an infinite loop.
         private const uint LoopSafetyIterations = 0x2000;
-
-        private static SpvInstruction AddLoopSafetyCheck(CodeGenContext context, SpvInstruction condition)
-        {
-            SpvInstruction counterType = context.TypeU32();
-            SpvInstruction counterPointerType = context.TypePointer(StorageClass.Private, counterType);
-            SpvInstruction counter = context.Variable(counterPointerType, StorageClass.Private, context.Constant(counterType, LoopSafetyIterations));
-            context.AddGlobalVariable(counter);
-
-            SpvInstruction oldValue = context.Load(counterType, counter);
-            SpvInstruction newValue = context.ISub(counterType, oldValue, context.Constant(counterType, 1u));
-            context.Store(counter, newValue);
-
-            // Match Eden exactly: the per-invocation budget is not reset when a nested loop
-            // is entered again, so repeated re-entry cannot turn into an unbounded workload.
-            SpvInstruction withinLimit = context.SGreaterThanEqual(context.TypeBool(), newValue, context.Constant(counterType, 0u));
-
-            return context.LogicalAnd(context.TypeBool(), condition, withinLimit);
-        }
 
         // Resource pools for Spirv generation. Note: Increase count when more threads are being used.
         private const int GeneratorPoolCount = 1;
@@ -302,6 +286,20 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                         context.AddExecutionMode(spvFunc, ExecutionMode.EarlyFragmentTests);
                     }
 
+                    // NEO-LRZSCAN (diag): RYUJINX_NEO_LRZ_SCAN=1 logs fragment shaders that can disable LRZ/early-Z on Turnip.
+                    if (_lrzScan)
+                    {
+                        bool depthOut = context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Output, IoVariable.FragmentOutputDepth));
+                        int sbufs = context.Properties.StorageBuffers.Count;
+                        int images = context.Properties.Images.Count;
+
+                        if (depthOut || sbufs > 0 || images > 0)
+                        {
+                            Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu,
+                                $"[NEO-LRZSCAN] fs={TotkDiagShared.CurrentGuestHash} depth={depthOut} earlyZ={context.Definitions.EarlyZForce} sbufs={sbufs} images={images}");
+                        }
+                    }
+
                     if ((info.HelperFunctionsMask & HelperFunctionsMask.FSI) != 0 &&
                         context.HostCapabilities.SupportsFragmentShaderInterlock)
                     {
@@ -451,5 +449,24 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 }
             }
         }
+
+        private static SpvInstruction AddLoopSafetyCheck(CodeGenContext context, SpvInstruction condition)
+        {
+            SpvInstruction counterType = context.TypeU32();
+            SpvInstruction counterPointerType = context.TypePointer(StorageClass.Private, counterType);
+            SpvInstruction counter = context.Variable(counterPointerType, StorageClass.Private, context.Constant(counterType, LoopSafetyIterations));
+            context.AddGlobalVariable(counter);
+
+            SpvInstruction oldValue = context.Load(counterType, counter);
+            SpvInstruction newValue = context.ISub(counterType, oldValue, context.Constant(counterType, 1u));
+            context.Store(counter, newValue);
+
+            // Match Eden exactly: the per-invocation budget is not reset when a nested loop
+            // is entered again, so repeated re-entry cannot turn into an unbounded workload.
+            SpvInstruction withinLimit = context.SGreaterThanEqual(context.TypeBool(), newValue, context.Constant(counterType, 0u));
+
+            return context.LogicalAnd(context.TypeBool(), condition, withinLimit);
+        }
+
     }
 }

@@ -38,8 +38,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         public bool HasStore => _program.UsedFeatures.HasFlag(FeatureFlags.Store) || (IsTransformFeedbackEmulated && Definitions.LastInVertexPipeline);
 
         /// <summary>
-        /// True when this is a geometry shader declared as passthrough on the shader program header.
-        /// Only this kind of geometry shader depends on the geometry shader passthrough extension.
+        /// True when this geometry shader is declared as passthrough.
         /// </summary>
         public bool GpPassthrough => Definitions.GpPassthrough;
 

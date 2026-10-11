@@ -85,7 +85,6 @@ namespace Ryujinx.Cpu.Nce
         private delegate void CacheRange(ulong start, ulong end, ulong lineSize);
         private static MemoryBlock _codeBlock;
         private static ThreadStart _threadStart;
-        private static nint _signalExitPc;
         private static GetTpidrEl0 _getTpidrEl0;
         private static GetCtrEl0 _getCtrEl0;
         private static CacheRange _cleanDataCache;
@@ -102,7 +101,6 @@ namespace Ryujinx.Cpu.Nce
 
             uint[] threadStartCode = NcePatcher.GenerateThreadStartCode();
             uint[] ehSuspendCode = NcePatcher.GenerateSuspendExceptionHandler();
-            uint[] signalExitCode = PlatformInfo.IsBionic ? NcePatcher.GenerateAndroidSignalExitCode() : Array.Empty<uint>();
 
             ulong threadStartCodeOffset = codeWriter.Write(threadStartCode);
             ulong getTpidrEl0CodeOffset = codeWriter.Write(_getTpidrEl0Code);
@@ -110,21 +108,77 @@ namespace Ryujinx.Cpu.Nce
             ulong cleanDataCacheCodeOffset = codeWriter.Write(_cleanDataCacheCode);
             ulong invalidateInstructionCacheCodeOffset = codeWriter.Write(_invalidateInstructionCacheCode);
             ulong ehSuspendCodeOffset = codeWriter.Write(ehSuspendCode);
-            ulong signalExitCodeOffset = codeWriter.Write(signalExitCode);
 
             MemoryBlock codeBlock = null;
+            uint[] ehWrapperCode = null;
+            ulong ehWrapperCodeOffset = 0;
 
             NativeSignalHandler.InstallUnixSignalWrapper((nint oldSignalHandlerSegfaultPtr, nint signalHandlerPtr) =>
             {
-                uint[] ehWrapperCode = PlatformInfo.IsBionic
-                    ? NcePatcher.GenerateAndroidWrapperExceptionHandler(signalHandlerPtr, nint.Zero, NceNativeInterface.GetSuspendThreadHandlerFunctionPointer(), oldSignalHandlerSegfaultPtr)
-                    : NcePatcher.GenerateWrapperExceptionHandler(oldSignalHandlerSegfaultPtr, signalHandlerPtr);
-                ulong ehWrapperCodeOffset = codeWriter.Write(ehWrapperCode);
-                codeBlock = codeWriter.CreateMemoryBlock();
-                return codeBlock.GetPointer(ehWrapperCodeOffset, (ulong)ehWrapperCode.Length * sizeof(uint));
-            }, PlatformInfo.IsBionic ? NceSignalChain.Create : null);
+                ehWrapperCode = NcePatcher.GenerateWrapperExceptionHandler(
+                    oldSignalHandlerSegfaultPtr,
+                    signalHandlerPtr);
 
-            NativeSignalHandler.InstallUnixSignalHandler(NceThreadPal.UnixSuspendSignal, codeBlock.GetPointer(ehSuspendCodeOffset, (ulong)ehSuspendCode.Length * sizeof(uint)));
+                ehWrapperCodeOffset = codeWriter.Write(ehWrapperCode);
+                codeBlock = codeWriter.CreateMemoryBlock();
+
+                return codeBlock.GetPointer(
+                    ehWrapperCodeOffset,
+                    (ulong)ehWrapperCode.Length * sizeof(uint));
+            });
+
+            nint wrapperPtr = codeBlock.GetPointer(
+                ehWrapperCodeOffset,
+                (ulong)ehWrapperCode.Length * sizeof(uint));
+
+            nint suspendPtr = codeBlock.GetPointer(
+                ehSuspendCodeOffset,
+                (ulong)ehSuspendCode.Length * sizeof(uint));
+
+            try
+            {
+                byte[] wrapperBytes =
+                    new byte[ehWrapperCode.Length * sizeof(uint)];
+
+                Buffer.BlockCopy(
+                    ehWrapperCode, 0,
+                    wrapperBytes, 0,
+                    wrapperBytes.Length);
+
+                byte[] suspendBytes =
+                    new byte[ehSuspendCode.Length * sizeof(uint)];
+
+                Buffer.BlockCopy(
+                    ehSuspendCode, 0,
+                    suspendBytes, 0,
+                    suspendBytes.Length);
+
+                System.IO.File.WriteAllBytes(
+                    "/tmp/ryujinx-nce-wrapper.bin",
+                    wrapperBytes);
+
+                System.IO.File.WriteAllBytes(
+                    "/tmp/ryujinx-nce-suspend.bin",
+                    suspendBytes);
+
+                System.IO.File.WriteAllText(
+                    "/tmp/ryujinx-nce-wrapper.txt",
+                    $"WRAPPER_PTR=0x{(ulong)wrapperPtr:X16}\n" +
+                    $"WRAPPER_SIZE=0x{wrapperBytes.Length:X}\n" +
+                    $"WRAPPER_OFFSET=0x{ehWrapperCodeOffset:X}\n" +
+                    $"SUSPEND_PTR=0x{(ulong)suspendPtr:X16}\n" +
+                    $"SUSPEND_SIZE=0x{suspendBytes.Length:X}\n" +
+                    $"SUSPEND_OFFSET=0x{ehSuspendCodeOffset:X}\n" +
+                    $"THREAD_START_OFFSET=0x{threadStartCodeOffset:X}\n" +
+                    $"TPIDR_OFFSET=0x{getTpidrEl0CodeOffset:X}\n");
+            }
+            catch
+            {
+            }
+
+            NativeSignalHandler.InstallUnixSignalHandler(
+                NceThreadPal.UnixSuspendSignal,
+                suspendPtr);
 
             _threadStart = Marshal.GetDelegateForFunctionPointer<ThreadStart>(codeBlock.GetPointer(threadStartCodeOffset, (ulong)threadStartCode.Length * sizeof(uint)));
             _getTpidrEl0 = Marshal.GetDelegateForFunctionPointer<GetTpidrEl0>(codeBlock.GetPointer(getTpidrEl0CodeOffset, (ulong)_getTpidrEl0Code.Length * sizeof(uint)));
@@ -139,14 +193,6 @@ namespace Ryujinx.Cpu.Nce
                 _instructionCacheLineSize = 4UL << (int)(ctrEl0 & 0xf);
             }
 
-            _signalExitPc = PlatformInfo.IsBionic
-                ? codeBlock.GetPointer(signalExitCodeOffset, (ulong)signalExitCode.Length * sizeof(uint))
-                : nint.Zero;
-            if (PlatformInfo.IsBionic)
-            {
-                NceSnapshotCodeMap.EntryStart = (ulong)codeBlock.GetPointer(threadStartCodeOffset, (ulong)threadStartCode.Length * 4);
-                NceSnapshotCodeMap.EntryEnd = NceSnapshotCodeMap.EntryStart + (ulong)threadStartCode.Length * 4;
-            }
             _codeBlock = codeBlock;
         }
 
@@ -154,8 +200,6 @@ namespace Ryujinx.Cpu.Nce
         {
             _tickSource = tickSource;
             _memoryManager = memory;
-
-
 
             Logger.Info?.Print(
                 LogClass.Cpu,
@@ -165,9 +209,7 @@ namespace Ryujinx.Cpu.Nce
         /// <inheritdoc/>
         public IExecutionContext CreateExecutionContext(ExceptionCallbacks exceptionCallbacks)
         {
-            return _memoryManager is MemoryManagerNative native
-                ? new NceExecutionContext(exceptionCallbacks, native.GuestAddressStart, native.GuestAddressEnd, _signalExitPc, PlatformInfo.IsBionic ? native : null)
-                : new NceExecutionContext(exceptionCallbacks);
+            return new NceExecutionContext(exceptionCallbacks);
         }
 
         /// <inheritdoc/>

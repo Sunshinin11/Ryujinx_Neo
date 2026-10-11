@@ -2521,12 +2521,6 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
                 KProcess process = KernelStatic.GetCurrentProcess();
 
                 result = process.HandleTable.GenerateHandle(thread, out handle);
-
-                if (result == Result.Success)
-                {
-                    // NEOV2-TLSHANDLE1: pass the thread handle to the thread local region, like the real kernel.
-                    thread.SetThreadLocalHandle(handle);
-                }
             }
             else
             {

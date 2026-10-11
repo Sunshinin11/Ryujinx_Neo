@@ -28,8 +28,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
         public const int RenderTargetStateIndex = 27;
 
         // Vertex buffers larger than this size will be clamped to the mapped size.
-        // NEOV2-COSMIC2: igual ao Eden (buffer_cache.h UpdateVertexBuffer, "size >= 64_MiB"):
-        // a partir de 64 MiB o tamanho e limitado ao trecho mapeado E fisicamente continuo.
         private const ulong VertexBufferSizeToContiguousSizeThreshold = 64 * 1024 * 1024; // 64 MB
 
         private readonly GpuContext _context;
@@ -299,6 +297,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
 
             _updateTracker.Update(ulong.MaxValue);
 
+            TimelineDrawE12();
+
             // If any state that the shader depends on changed,
             // then we may need to compile/bind a different version
             // of the shader for the new state.
@@ -393,13 +393,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 {
                     BufferDescriptor sb = info.SBuffers[index];
 
-                    if (TextureArrayFeedback.IsFeedbackBuffer(sb))
-                    {
-                        // NEOV2-ARRAYFB1: host buffer, not guest memory.
-                        _channel.BufferManager.SetGraphicsTextureArrayFeedback(stage, sb.Slot);
-                        continue;
-                    }
-
                     ulong sbDescAddress = _channel.BufferManager.GetGraphicsUniformBufferAddress(stage, sb.SbCbSlot);
                     sbDescAddress += (ulong)sb.SbCbOffset * 4;
 
@@ -456,7 +449,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
         {
             bool enable = _state.State.RasterizeEnable;
             _pipeline.RasterizerDiscard = !enable;
-            _context.Renderer.Pipeline.SetRasterizerDiscard(!enable);
+            _context.Renderer.Pipeline.SetRasterizerDiscard(!enable || _rasterSkipActiveE12);
         }
 
         /// <summary>
@@ -580,6 +573,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                     }
                 }
             }
+
+            ViewTraceE31(depthStencil);
 
             changedScale |= _channel.TextureManager.SetRenderTargetDepthStencil(depthStencil);
 
@@ -727,6 +722,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 _state.State.DepthTestFunc);
 
             _pipeline.DepthTest = descriptor;
+
+            if (_depthOverrideActiveE11)
+            {
+                // DEPTHALWAYS-E11: keep the override while a tile-volume program is bound.
+                descriptor = new DepthTestDescriptor(descriptor.TestEnable, descriptor.WriteEnable, CompareOp.Always);
+            }
+
             _context.Renderer.Pipeline.SetDepthTest(descriptor);
         }
 
@@ -870,7 +872,38 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             enables |= (depthBias.FillEnable ? PolygonModeMask.Fill : 0);
 
             _pipeline.BiasEnable = enables;
+
+            if (_biasOverrideE13.HasValue)
+            {
+                // TOTK-DIAG-E13: diagnostic constant depth bias (Vulkan units) for selected draws.
+                _context.Renderer.Pipeline.SetDepthBias(PolygonModeMask.Fill, 0f, _biasOverrideE13.Value, 0f);
+                return;
+            }
+
             _context.Renderer.Pipeline.SetDepthBias(enables, factor, units / 2f, clamp);
+        }
+
+        private float? _biasOverrideE13;
+
+        private void BiasOverrideE13()
+        {
+            if (!TotkDiagE12.Enabled)
+            {
+                return;
+            }
+
+            float? bias = TotkDiagE12.GetBias(_e12Fs);
+
+            if (bias != _biasOverrideE13)
+            {
+                _biasOverrideE13 = bias;
+                UpdateDepthBiasState();
+
+                if (bias.HasValue)
+                {
+                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[TOTK-DIAG-E13] bias {bias.Value} applied fs={_e12Fs}");
+                }
+            }
         }
 
         /// <summary>
@@ -1181,17 +1214,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
 
                         size = Math.Min(size, maxVertexBufferSize);
                     }
-                    else if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled ? size >= VertexBufferSizeToContiguousSizeThreshold : size > 256UL * 1024 * 1024)
+                    else if (Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled
+                        ? size >= VertexBufferSizeToContiguousSizeThreshold
+                        : size > 256UL * 1024 * 1024)
                     {
-                        // Make sure we have a sane vertex buffer size, since in some cases applications
-                        // might set the "end address" of the vertex buffer to the end of the GPU address space,
-                        // which would result in a several GBs large buffer.
-                        //
-                        // NEOV2-COSMIC2: antes usava GetMappedSize (so "mapeado") acima de 256 MB.
-                        // O buffer e criado a partir do endereco fisico da primeira pagina, entao
-                        // tudo depois da primeira descontinuidade fisica nunca foi dado valido deste
-                        // vertex buffer, e so gerava buffers gigantes (Marvel Cosmic Invasion: ~3 GB).
-
+                        // Em modo experimental, limita também à continuidade física,
+                        // evitando buffers multi-GB sobre regiões virtuais descontíguas.
                         size = Ryujinx.Common.Diagnostics.NeoGraphicsSettings.ExperimentalGameFixesEnabled
                             ? _channel.MemoryManager.GetContiguousMappedSize(address, size)
                             : _channel.MemoryManager.GetMappedSize(address, size);
@@ -1207,7 +1235,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                     size = Math.Min(vbSize, (ulong)((firstInstance + drawFirstVertex + drawVertexCount) * stride));
                 }
 
-                vertexBuffersSpan[index] = new BufferPipelineDescriptor(Ryujinx.Common.Diagnostics.NeoGraphicsSettings.HugareOptimizationsEnabled ? mapped : _channel.MemoryManager.IsMapped(address), stride, divisor);
+                vertexBuffersSpan[index] = new BufferPipelineDescriptor(mapped, stride, divisor);
                 _channel.BufferManager.SetVertexBuffer(index, address, size, stride, divisor);
             }
 
@@ -1445,6 +1473,443 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
         /// <summary>
         /// Updates host shaders based on the guest GPU state.
         /// </summary>
+        // GFXDUMP-E8: env-gated dump of guest code of every graphics program used (dedup by stage hash).
+        private static readonly string _gfxDumpDirE8 =
+            System.Environment.GetEnvironmentVariable("RYUJINX_TOTK_GFX_DUMP_DIR");
+        private static readonly System.Collections.Generic.HashSet<string> _gfxDumpedE8 = new();
+
+        private static void GfxDumpE8(CachedShaderProgram gs)
+        {
+            if (string.IsNullOrEmpty(_gfxDumpDirE8) || gs?.Shaders == null)
+            {
+                return;
+            }
+
+            lock (_gfxDumpedE8)
+            {
+                var sb = new System.Text.StringBuilder();
+                bool any = false;
+
+                for (int i = 0; i < gs.Shaders.Length; i++)
+                {
+                    byte[] code = gs.Shaders[i]?.Code;
+                    if (code == null)
+                    {
+                        continue;
+                    }
+
+                    string h = System.Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(code)).Substring(0, 16).ToLowerInvariant();
+                    sb.Append($" s{i}={h}");
+
+                    if (_gfxDumpedE8.Add(h))
+                    {
+                        any = true;
+                        try
+                        {
+                            System.IO.Directory.CreateDirectory(_gfxDumpDirE8);
+                            System.IO.File.WriteAllBytes(System.IO.Path.Combine(_gfxDumpDirE8, $"gfx_s{i}_{h}.bin"), code);
+                        }
+                        catch (System.Exception)
+                        {
+                        }
+                    }
+                }
+
+                if (any)
+                {
+                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[TOTK-GFXDUMP-E8]{sb}");
+                }
+            }
+        }
+
+        // TOTK-DIAG-E12: hot-reloadable draw skip (rasterizer discard) by guest vertex/fragment hash.
+        private bool _rasterSkipActiveE12;
+        private string _e12Vs;
+        private string _e12Fs;
+        private bool _e30Layer;
+
+        private void RasterSkipE12(CachedShaderProgram gs)
+        {
+            if (!TotkDiagE12.Enabled)
+            {
+                return;
+            }
+
+            _e12Vs = TotkDiagE12.VertexHash(gs);
+            _e30Layer = (gs?.Shaders != null && gs.Shaders.Length > 1 && gs.Shaders[1]?.Info != null && gs.Shaders[1].Info.UsesRtLayer) ||
+                        (gs?.Shaders != null && gs.Shaders.Length > 4 && gs.Shaders[4]?.Info != null && gs.Shaders[4].Info.UsesRtLayer);
+            _e12Fs = TotkDiagE12.FragmentHash(gs);
+
+            bool skip = TotkDiagE12.ShouldSkip(_e12Fs) || TotkDiagE12.ShouldSkip(_e12Vs);
+
+            if (skip != _rasterSkipActiveE12)
+            {
+                _rasterSkipActiveE12 = skip;
+                UpdateRasterizerState();
+            }
+        }
+
+        // IDDUMP-E15: on trigger (diag dir/"dump-idwriter-now"), dump vertex-stage SBs + CBs of the
+        // TOTK tile ID writer (vs 9e24cb2a27f11951) right before it is drawn (tracked, GPU-synced reads).
+        private static long _idDumpLastPollE15;
+        private static int _idDumpSeqE15;
+
+        private void IdWriterDumpE15(CachedShaderProgram gs)
+        {
+            if (!TotkDiagE12.Enabled || _e12Vs != "9e24cb2a27f11951")
+            {
+                return;
+            }
+
+            long now = System.Environment.TickCount64;
+            if (now - _idDumpLastPollE15 < 300)
+            {
+                return;
+            }
+
+            _idDumpLastPollE15 = now;
+            string dir = TotkDiagE12.Dir;
+            string trigger = System.IO.Path.Combine(dir, "dump-idwriter-now");
+
+            if (!System.IO.File.Exists(trigger))
+            {
+                return;
+            }
+
+            try
+            {
+                System.IO.File.Delete(trigger);
+                int seq = ++_idDumpSeqE15;
+                var meta = new System.Text.StringBuilder();
+                meta.AppendLine($"seq={seq} vs={_e12Vs} fs={_e12Fs} time={System.DateTime.Now:O}");
+
+                for (int cb = 0; cb < 18; cb++)
+                {
+                    ulong cbVa = _channel.BufferManager.GetGraphicsUniformBufferAddress(0, cb);
+                    if (cbVa == 0)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        // Uniform buffer addresses here are physical addresses.
+                        byte[] data = _channel.MemoryManager.Physical.GetSpan(cbVa, 0x1000, tracked: true).ToArray();
+                        System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, $"id{seq:D2}_vs_cb{cb}.bin"), data);
+                        meta.AppendLine($"cb{cb} pa=0x{cbVa:X}");
+                    }
+                    catch (System.Exception ex)
+                    {
+                        meta.AppendLine($"cb{cb} pa=0x{cbVa:X} FAILED {ex.Message}");
+                    }
+                }
+
+                ShaderProgramInfo info = gs.Shaders[1]?.Info;
+                for (int i = 0; info != null && i < info.SBuffers.Count; i++)
+                {
+                    BufferDescriptor sb = info.SBuffers[i];
+                    ulong descVa = _channel.BufferManager.GetGraphicsUniformBufferAddress(0, sb.SbCbSlot) + (ulong)sb.SbCbOffset * 4;
+                    try
+                    {
+                        SbDescriptor desc = _channel.MemoryManager.Physical.Read<SbDescriptor>(descVa);
+                        ulong va = desc.PackAddress();
+                        int size = desc.Size > 0 ? System.Math.Min(desc.Size, 4 * 1024 * 1024) : 0x10000;
+                        meta.AppendLine($"sb{sb.Slot} cbslot={sb.SbCbSlot} cboff={sb.SbCbOffset} va=0x{va:X} size={desc.Size}");
+                        byte[] data = _channel.MemoryManager.GetSpan(va, size, tracked: true).ToArray();
+                        System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, $"id{seq:D2}_vs_sb{sb.Slot}.bin"), data);
+                    }
+                    catch (System.Exception ex)
+                    {
+                        meta.AppendLine($"sb{sb.Slot} FAILED {ex.Message}");
+                    }
+                }
+
+                System.IO.File.WriteAllText(System.IO.Path.Combine(dir, $"id{seq:D2}_meta.txt"), meta.ToString());
+                Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[TOTK-IDDUMP-E15] {meta.ToString().Replace(System.Environment.NewLine, " | ")}");
+            }
+            catch (System.Exception ex)
+            {
+                Ryujinx.Common.Logging.Logger.Error?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[TOTK-IDDUMP-E15] failed: {ex}");
+            }
+        }
+
+        // SHADOWDUMP-E16: on trigger (diag dir/"dump-shadow-now"), when the program bound right after
+        // fs 6a7d805adb0cfaae is set, dump the textures that were bound for that draw (still cached),
+        // plus the fragment-stage constant buffers. Host texture data is read back synchronously.
+        private CachedShaderProgram _e16PrevGs;
+        private string _e16PrevFs;
+        private static int _e16Seq;
+        private static readonly System.Collections.Generic.HashSet<string> _e26Dumped = new();
+
+        private void ShadowPassDumpE16(CachedShaderProgram gs)
+        {
+            if (!TotkDiagE12.Enabled)
+            {
+                return;
+            }
+
+            CachedShaderProgram prevGs = _e16PrevGs;
+            string prevFs = _e16PrevFs;
+            _e16PrevGs = gs;
+            _e16PrevFs = _e12Fs;
+
+            string[] targetsE26 = TotkDiagE12.DumpTargets;
+            if (prevGs == null || System.Array.IndexOf(targetsE26, prevFs) < 0)
+            {
+                return;
+            }
+
+            string dir = TotkDiagE12.Dir;
+            string trigger = System.IO.Path.Combine(dir, "dump-shadow-now");
+
+            if (!System.IO.File.Exists(trigger))
+            {
+                _e26Dumped.Clear();
+                return;
+            }
+
+            if (!_e26Dumped.Add(prevFs))
+            {
+                return;
+            }
+
+            if (_e26Dumped.Count >= targetsE26.Length)
+            {
+                try
+                {
+                    System.IO.File.Delete(trigger);
+                }
+                catch (System.Exception)
+                {
+                }
+
+                _e26Dumped.Clear();
+            }
+
+            int seq = ++_e16Seq;
+            var meta = new System.Text.StringBuilder();
+            meta.AppendLine($"seq={seq} fs={prevFs} time={System.DateTime.Now:O}");
+
+            for (int cb = 0; cb < 18; cb++)
+            {
+                try
+                {
+                    ulong pa = _channel.BufferManager.GetGraphicsUniformBufferAddress(4, cb);
+                    if (pa == 0 || pa == ulong.MaxValue)
+                    {
+                        continue;
+                    }
+
+                    byte[] data = _channel.MemoryManager.Physical.GetSpan(pa, 0x1000, tracked: true).ToArray();
+                    System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, $"sh{seq:D2}_fs_cb{cb}.bin"), data);
+                    meta.AppendLine($"cb{cb} pa=0x{pa:X}");
+
+                    // E38: host-side copy of the same uniform buffer range (what the GPU actually reads).
+                    var hostRange = _channel.MemoryManager.Physical.BufferCache.GetBufferRange(
+                        new Ryujinx.Memory.Range.MultiRange(pa, 0x400), Ryujinx.Graphics.Gpu.Memory.BufferStage.Fragment);
+                    using (var hostData = _context.Renderer.GetBufferData(hostRange.Handle, hostRange.Offset, 0x400))
+                    {
+                        System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, $"sh{seq:D2}_fs_cb{cb}_host.bin"), hostData.Get().ToArray());
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    meta.AppendLine($"cb{cb} FAILED {ex.Message}");
+                }
+            }
+
+            TextureBindingInfo[] texBindings = prevGs.Bindings?.TextureBindings != null && prevGs.Bindings.TextureBindings.Length > 4
+                ? prevGs.Bindings.TextureBindings[4]
+                : System.Array.Empty<TextureBindingInfo>();
+
+            foreach (TextureBindingInfo b in texBindings)
+            {
+                try
+                {
+                    Ryujinx.Graphics.Gpu.Image.Texture tex = _channel.TextureManager.GetGraphicsCachedTextureForBinding(b.Binding);
+                    if (tex == null)
+                    {
+                        meta.AppendLine($"tex binding={b.Binding} handle=0x{b.Handle:X} target={b.Target} NULL");
+                        continue;
+                    }
+
+                    var ti = tex.Info;
+                    meta.AppendLine(
+                        $"tex binding={b.Binding} handle=0x{b.Handle:X} target={b.Target} fmt={tex.Format} " +
+                        $"size={ti.Width}x{ti.Height}x{ti.DepthOrLayers} levels={ti.Levels} va=0x{ti.GpuAddress:X} " +
+                        $"hostSize={tex.Size} id={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(tex)} isView={tex.IsView} storageId={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(tex.ViewStorageE31)} inCache={tex.CacheNode != null}");
+
+                    using (var pinned = tex.HostTexture.GetData(0, 0))
+                    {
+                        byte[] data = pinned.Get().ToArray();
+                        System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, $"sh{seq:D2}_tex{b.Binding}.bin"), data);
+                        meta.AppendLine($"   dumped level0/layer0 bytes={data.Length}");
+                    }
+
+                    // LAYERS-E25: dump every layer of array textures (e.g. shadow cascades).
+                    if (ti.Target == Ryujinx.Graphics.GAL.Target.Texture2DArray && ti.DepthOrLayers > 1)
+                    {
+                        for (int layer = 1; layer < ti.DepthOrLayers && layer < 8; layer++)
+                        {
+                            using var pl = tex.HostTexture.GetData(layer, 0);
+                            System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, $"sh{seq:D2}_tex{b.Binding}_L{layer}.bin"), pl.Get().ToArray());
+                        }
+
+                        meta.AppendLine($"   dumped layers 1..{ti.DepthOrLayers - 1}");
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    meta.AppendLine($"tex binding={b.Binding} FAILED {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            for (int rt = 0; rt < 8; rt++)
+            {
+                try
+                {
+                    Ryujinx.Graphics.Gpu.Image.Texture rtTex = _channel.TextureManager.GetRenderTargetColorE18(rt);
+                    if (rtTex == null)
+                    {
+                        continue;
+                    }
+
+                    var rtInfo = rtTex.Info;
+                    meta.AppendLine($"rt{rt} fmt={rtTex.Format} size={rtInfo.Width}x{rtInfo.Height}x{rtInfo.DepthOrLayers} va=0x{rtInfo.GpuAddress:X}");
+                    using var pinned = rtTex.HostTexture.GetData(0, 0);
+                    byte[] data = pinned.Get().ToArray();
+                    System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, $"sh{seq:D2}_rt{rt}.bin"), data);
+                    meta.AppendLine($"   dumped bytes={data.Length}");
+                }
+                catch (System.Exception ex)
+                {
+                    meta.AppendLine($"rt{rt} FAILED {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            System.IO.File.WriteAllText(System.IO.Path.Combine(dir, $"sh{seq:D2}_meta.txt"), meta.ToString());
+            Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[TOTK-SHADOWDUMP-E16] {meta.ToString().Replace(System.Environment.NewLine, " | ")}");
+        }
+
+        private static readonly System.Collections.Generic.HashSet<string> _e31Seen = new();
+
+        private static void ViewTraceE31(Image.Texture t)
+        {
+            if (!TotkDiagE12.Enabled || t == null || t.Info.Width != 800 || t.Info.Height != 800)
+            {
+                return;
+            }
+
+            Image.Texture st = t.ViewStorageE31;
+            string line = $"zeta va=0x{t.Info.GpuAddress:X} fmt={t.Format} {t.Info.Target} layers={t.Info.DepthOrLayers} isView={t.IsView} firstLayer={t.FirstLayer} " +
+                          $"storage va=0x{st.Info.GpuAddress:X} {st.Info.Target} layers={st.Info.DepthOrLayers} fmt={st.Format}";
+
+            lock (_e31Seen)
+            {
+                if (_e31Seen.Add(line))
+                {
+                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[TOTK-VIEWTRACE-E31] {line}");
+                }
+            }
+        }
+
+        private void TimelineDrawE12()
+        {
+            if (!TotkDiagE12.Enabled)
+            {
+                return;
+            }
+
+            ref var st = ref _state.State;
+            var rt0 = st.RtColorState[0];
+            TotkDiagE12.Timeline(
+                $"DRAW vs={_e12Vs} fs={_e12Fs} skip={_rasterSkipActiveE12} rtN={st.RtControl.UnpackCount()} rt0={rt0.WidthOrStride}x{rt0.Height}:{rt0.Format} " +
+                $"zs={(bool)st.RtDepthStencilEnable}:{st.RtDepthStencilState.Format} dt={(bool)st.DepthTestEnable}/{(bool)st.DepthWriteEnable}/{st.DepthTestFunc} " +
+                $"idx={_drawState.DrawIndexed} ind={_drawState.DrawIndirect} " +
+                $"zva=0x{st.RtDepthStencilState.Address.Pack():X} zsz={st.RtDepthStencilSize.Width}x{st.RtDepthStencilSize.Height}x{st.RtDepthStencilSize.Depth} zlsz={st.RtDepthStencilState.LayerSize} vsLayer={_e30Layer} " +
+                $"bias={(bool)st.DepthBiasState.FillEnable}/{st.DepthBiasFactor}/{st.DepthBiasUnits}/{st.DepthBiasClamp} vvcc={st.ViewVolumeClipControl} cull={(bool)st.FaceState.CullEnable}");
+        }
+
+        // DEPTHALWAYS-E11 (diagnostic): force depth func ALWAYS for the TOTK tile-volume draws.
+        private static readonly bool _depthAlwaysE11 =
+            System.Environment.GetEnvironmentVariable("RYUJINX_TOTK_TILEVOL_DEPTH_ALWAYS") == "1";
+        private bool _depthOverrideActiveE11;
+
+        private void DepthOverrideE11(CachedShaderProgram gs)
+        {
+            if (!_depthAlwaysE11)
+            {
+                return;
+            }
+
+            byte[] code = gs?.Shaders != null && gs.Shaders.Length >= 6 ? gs.Shaders[5]?.Code : null;
+            string fs = code != null
+                ? System.Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(code)).Substring(0, 16).ToLowerInvariant()
+                : null;
+
+            bool match = fs == "8cbd66f22b8b8310" || fs == "fab36c797840fc50";
+
+            if (match)
+            {
+                _context.Renderer.Pipeline.SetDepthTest(new DepthTestDescriptor(
+                    _state.State.DepthTestEnable,
+                    _state.State.DepthWriteEnable,
+                    CompareOp.Always));
+
+                if (!_depthOverrideActiveE11)
+                {
+                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[TOTK-DEPTHALWAYS-E11] override applied fs={fs}");
+                }
+
+                _depthOverrideActiveE11 = true;
+            }
+            else if (_depthOverrideActiveE11)
+            {
+                _depthOverrideActiveE11 = false;
+                UpdateDepthTestState();
+            }
+        }
+
+        // STATETRACE-E10: env-gated fixed-function state trace for the TOTK tile-volume draws.
+        private static readonly bool _stateTraceE10 =
+            System.Environment.GetEnvironmentVariable("RYUJINX_TOTK_STATETRACE") == "1";
+        private static readonly System.Collections.Generic.HashSet<string> _stateSeenE10 = new();
+
+        private void StateTraceE10(CachedShaderProgram gs)
+        {
+            if (!_stateTraceE10 || gs?.Shaders == null || gs.Shaders.Length < 6 || gs.Shaders[5]?.Code == null)
+            {
+                return;
+            }
+
+            string fs = System.Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(gs.Shaders[5].Code)).Substring(0, 16).ToLowerInvariant();
+
+            if (fs != "8cbd66f22b8b8310" && fs != "fab36c797840fc50")
+            {
+                return;
+            }
+
+            ref var st = ref _state.State;
+            var vt = st.ViewportTransform[0];
+            var ve = st.ViewportExtents[0];
+
+            string line =
+                $"fs={fs} clip=0x{(uint)st.ViewVolumeClipControl:X} depthMode={st.DepthMode} " +
+                $"vpT=s({vt.ScaleX},{vt.ScaleY},{vt.ScaleZ}) t({vt.TranslateX},{vt.TranslateY},{vt.TranslateZ}) " +
+                $"vpE=({ve.X},{ve.Y},{ve.Width},{ve.Height}) z[{ve.DepthNear},{ve.DepthFar}] " +
+                $"dt={(bool)st.DepthTestEnable} dw={(bool)st.DepthWriteEnable} df={st.DepthTestFunc} zs={(bool)st.RtDepthStencilEnable}:{st.RtDepthStencilState.Format} " +
+                $"cull={(bool)st.FaceState.CullEnable}:{st.FaceState.CullFace}:{st.FaceState.FrontFace} poly={st.PolygonModeFront} rast={(bool)st.RasterizeEnable} " +
+                $"rt={st.RtControl.UnpackCount()} yctl={st.YControl}";
+
+            lock (_stateSeenE10)
+            {
+                if (_stateSeenE10.Add(line))
+                {
+                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"[TOTK-STATETRACE-E10] {line}");
+                }
+            }
+        }
+
         private void UpdateShaderState()
         {
             ShaderCache shaderCache = _channel.MemoryManager.Physical.ShaderCache;
@@ -1480,6 +1945,24 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 ref _currentSpecState.GetPoolState(),
                 ref _currentSpecState.GetGraphicsState(),
                 addresses);
+
+            GfxDumpE8(gs);
+            StateTraceE10(gs);
+            DepthOverrideE11(gs);
+            RasterSkipE12(gs);
+            IdWriterDumpE15(gs);
+            ShadowPassDumpE16(gs);
+            BiasOverrideE13();
+
+            GraphicsCompatibility.RegisterMua3Program(
+                gs.HostProgram,
+                new Mua3ShaderIdentity(
+                    addresses.VertexA,
+                    addresses.VertexB,
+                    addresses.TessControl,
+                    addresses.TessEvaluation,
+                    addresses.Geometry,
+                    addresses.Fragment));
 
             // Consume the modified flag for spec state so that it isn't checked again.
             _currentSpecState.SetShader(gs);

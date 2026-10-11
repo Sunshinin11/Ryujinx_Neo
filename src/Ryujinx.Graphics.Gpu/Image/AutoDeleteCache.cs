@@ -67,9 +67,6 @@ namespace Ryujinx.Graphics.Gpu.Image
         private ulong _maxCacheMemoryUsage = DefaultTextureSizeCapacity;
 
         private readonly LinkedList<Texture> _textures;
-
-        // NEOV2-GPUMEM1: frame counter for the Eden-style collection.
-        private ulong _frameTick;
         private ulong _totalSize;
 
         private HashSet<ShortTextureCacheEntry> _shortCacheBuilder;
@@ -131,20 +128,10 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             texture.IncrementReferenceCount();
             texture.CacheNode = _textures.AddLast(texture);
-            texture.CacheLastUseFrame = _frameTick;
 
             if (_textures.Count > MaxCapacity ||
                 (_totalSize > _maxCacheMemoryUsage && _textures.Count >= MinCountForDeletion))
             {
-                RemoveLeastUsedTexture();
-            }
-            else if (GraphicsConfig.EdenGpuMemory &&
-                     _textures.Count >= MinCountForDeletion &&
-                     (Ryujinx.Graphics.GAL.GpuMemoryStats.TotalBytes >= Ryujinx.Graphics.GAL.GpuMemoryStats.CriticalBytes ||
-                      Ryujinx.Graphics.GAL.GpuMemoryStats.HostPressureLevel != 0))
-            {
-                // NEOV2-GPUMEM2: loading screens create textures without presenting frames, so the per frame
-                // collection never runs; above Eden's critical level, make room when a texture is added.
                 RemoveLeastUsedTexture();
             }
         }
@@ -167,8 +154,6 @@ namespace Ryujinx.Graphics.Gpu.Image
                     _textures.Remove(texture.CacheNode);
                     _textures.AddLast(texture.CacheNode);
                 }
-
-                texture.CacheLastUseFrame = _frameTick;
 
                 if (_totalSize > _maxCacheMemoryUsage && _textures.Count >= MinCountForDeletion)
                 {
@@ -343,54 +328,6 @@ namespace Ryujinx.Graphics.Gpu.Image
             toRemove.Clear();
             _shortCache = _shortCacheBuilder;
             _shortCacheBuilder = toRemove;
-        }
-
-        /// <summary>
-        /// NEOV2-GPUMEM1: per frame tick. With "Memoria de GPU estilo Eden" enabled, removes textures that were not
-        /// used recently once the device memory reaches Eden's thresholds (TextureCache::RunGarbageCollector:
-        /// 25 frames unused and 20 per tick, or 10 frames and 40 per tick when aggressive).
-        /// </summary>
-        public void TickMemoryPressure()
-        {
-            _frameTick++;
-
-            if (!GraphicsConfig.EdenGpuMemory)
-            {
-                return;
-            }
-
-            long total = Ryujinx.Graphics.GAL.GpuMemoryStats.TotalBytes;
-            int hostPressure = Ryujinx.Graphics.GAL.GpuMemoryStats.HostPressureLevel;
-
-            if (total < Ryujinx.Graphics.GAL.GpuMemoryStats.ExpectedBytes && hostPressure == 0)
-            {
-                return;
-            }
-
-            bool aggressive = hostPressure != 0 || total >= Ryujinx.Graphics.GAL.GpuMemoryStats.CriticalBytes;
-            ulong ticksToDestroy = aggressive ? 10UL : 25UL;
-            int maxRemovals = aggressive ? 40 : 20;
-
-            if (_frameTick <= ticksToDestroy)
-            {
-                return;
-            }
-
-            ulong threshold = _frameTick - ticksToDestroy;
-            int removed = 0;
-
-            while (removed < maxRemovals && _textures.Count >= MinCountForDeletion)
-            {
-                Texture oldest = _textures.First?.Value;
-
-                if (oldest == null || oldest.CacheLastUseFrame >= threshold)
-                {
-                    break;
-                }
-
-                RemoveLeastUsedTexture();
-                removed++;
-            }
         }
 
         public IEnumerator<Texture> GetEnumerator()

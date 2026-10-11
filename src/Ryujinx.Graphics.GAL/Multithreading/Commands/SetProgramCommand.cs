@@ -19,6 +19,8 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Commands
 
             threaded.Programs.WaitForProgram(program);
 
+            GraphicsCompatibility.TransferMua3Program(program, program.Base);
+
             renderer.Pipeline.SetProgram(program.Base);
         }
     }

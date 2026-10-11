@@ -503,6 +503,16 @@ namespace Ryujinx.Cpu.Nce.Arm64
             WriteInstruction(0xd53bd060u, rt);
         }
 
+        public void MrsNzcv(Operand rt)
+        {
+            WriteInstruction(0xd53b4200u, rt);
+        }
+
+        public void MsrNzcv(Operand rt)
+        {
+            WriteInstruction(0xd51b4200u, rt);
+        }
+
         public void Mrs(Operand rt, uint o0, uint op1, uint crn, uint crm, uint op2)
         {
             uint instruction = 0xd5300000u;
@@ -590,12 +600,6 @@ namespace Ryujinx.Cpu.Nce.Arm64
 
         public void Stlxr(Operand rt, Operand rn, Operand rs)
         {
-            int status = rs.GetRegister().Index;
-            if (status == rt.GetRegister().Index || (status == rn.GetRegister().Index && status != SpRegister))
-            {
-                throw new ArgumentException("STLXR status must differ from its value and non-SP base registers.");
-            }
-
             WriteInstructionRm16(0x0800fc00u | ((rt.Type == OperandType.I64 ? 3u : 2u) << 30), rt, rn, rs);
         }
 

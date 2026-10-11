@@ -15,8 +15,5 @@ namespace Ryujinx.Graphics.Shader
         NeedsScaleValue = 1 << 1,
         ImageStore = 1 << 2,
         ImageCoherent = 1 << 3,
-
-        // NEOV2-ARRAYFB1: the shader writes the pool indices it samples to the texture array feedback buffer.
-        ArrayFeedback = 1 << 4,
     }
 }

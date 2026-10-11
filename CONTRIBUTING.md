@@ -1,38 +1,124 @@
-# Contribuindo com o Ryujinx Neo
+# Contribution to Kenji-NX
 
-Obrigado pelo interesse no projeto. O Ryujinx Neo é um **fork pessoal e experimental** da linha Android/Bionic do Kenji-NX, construída sobre o trabalho original do Ryujinx. Há mudanças próprias, correções estudadas em outros projetos e código produzido com assistência de IA. Leia o [README](README.md) para entender a origem e os créditos antes de propor alterações.
+You can contribute to Kenji-NX with PRs, testing of PRs and issues. Contributing code and other implementations is greatly appreciated alongside simply filing issues for problems you encounter.
+Please read the entire document before continuing as it can potentially save everyone involved a significant amount of time.
 
-## Relatar um problema
+# Quick Links
 
-Procure uma issue semelhante antes de abrir outra. Ao relatar um bug, inclua, quando puder:
+* [Code Style Documentation](docs/coding-guidelines/coding-style.md)
+* [Pull Request Guidelines](docs/workflow/pr-guide.md)
 
-- jogo e versão, além do ponto exato onde o problema aparece;
-- aparelho, versão do Android, GPU e driver Vulkan;
-- commit ou versão do Ryujinx Neo;
-- modo NCE ou JIT, modo Dock/Portátil e opções por jogo alteradas;
-- passos para reproduzir, resultado esperado e resultado observado;
-- log e capturas de tela, removendo dados pessoais antes de publicar;
-- informação sobre regressão: em qual versão anterior funcionava.
+## Reporting Issues
 
-Não anexe jogos, firmware, chaves ou outro conteúdo protegido.
+We always welcome bug reports, feature proposals and overall feedback. Here are a few tips on how you can make reporting your issue as effective as possible.
 
-## Propor uma mudança
+### Finding Existing Issues
 
-Explique o problema, a hipótese e o efeito esperado. Uma boa alteração mantém um escopo claro, permite comparar antes/depois e informa quais jogos e aparelhos foram testados. Para mudanças em NCE, Vulkan ou shaders, descreva também riscos de regressão e como a opção pode ser desativada ou revertida.
+Before filing a new issue, please search our [open issues](https://git.ryujinx.app/kenji-nx/ryujinx/-/issues) to check if it already exists.
 
-Se a mudança foi inspirada ou adaptada de outro projeto, **cite a fonte, o commit ou a documentação técnica**. Preserve avisos de licença e créditos. O código herdado de Ryujinx e Kenji-NX não deve ser apresentado como criação original do Neo.
+If you do find an existing issue, please include your own feedback in the discussion. Do consider upvoting (👍 reaction) the original post, as this helps us prioritize popular issues in our backlog.
 
-## Uso de IA
+### Writing a Good Feature Request
 
-O projeto usa **vibe coding** e ferramentas de IA de forma aberta. Contribuições com assistência de IA são bem-vindas, mas a descrição deve dizer como a ferramenta foi usada e quais partes foram verificadas por uma pessoa. Não declare um teste como concluído se ele não foi executado. Trechos não testados devem ser identificados como tal.
+Please review any feature requests already opened to both check it has not already been suggested, and to familiarize yourself with the format. When ready to submit a proposal, please go [here](https://git.ryujinx.app/kenji-nx/ryujinx/-/issues).
 
-## Validação
+### Writing a Good Bug Report
 
-O projeto tem caminhos diferentes para Android, desktop e bibliotecas internas. Informe qual variante foi compilada e em qual ambiente a mudança foi testada. Para desempenho, mantenha jogo, save, driver, configuração e temperatura tão constantes quanto possível; uma única medição não prova ganho geral. Para correções gráficas, compare também a imagem, não apenas o FPS.
+Good bug reports make it easier for maintainers to verify and root cause the underlying problem. The better a bug report, the faster the problem will be resolved.
+Ideally, a bug report should contain the following information:
 
-As [orientações de estilo C#](docs/coding-guidelines/coding-style.md) herdadas da base continuam como referência. O [changelog](CHANGELOG.md) e o [relatório técnico histórico](docs/RELATORIO_COMPLETO_RYUJINX_NEO.md) ajudam a entender decisões anteriores, inclusive tentativas que não deram resultado.
+* A high-level description of the problem.
+* A _minimal reproduction_, i.e. the smallest time commitment/configuration required to reproduce the wrong behavior. This can be in the form of a small homebrew application, or by providing a save file and reproduction steps for a specific game.
+* A description of the _expected behavior_, contrasted with the _actual behavior_ observed.
+* Information on the environment: OS/distro, CPU, GPU (including driver), RAM etc.
+* A Ryujinx log file of the run instance where the issue occurred. Log files can be found in `[Executable Folder]/Logs` and are named chronologically.
+* Additional information, e.g. is it a regression from previous versions? Are there any known workarounds?
 
-## Licença e créditos
+When ready to submit a bug report, please go [here](https://git.ryujinx.app/kenji-nx/ryujinx/-/issues.
 
-Ao contribuir, respeite a [licença MIT](LICENSE.txt) do repositório e as licenças de componentes de terceiros em [THIRDPARTY.md](distribution/legal/THIRDPARTY.md). Se encontrar crédito ausente, abra uma issue com a fonte correspondente.
+## Contributing Changes
+
+Project maintainers will merge changes that both improve the project and meet our standards for code quality.
+
+The [Pull Request Guide](docs/workflow/pr-guide.md) and [License](LICENSE.txt) docs define additional guidance.
+
+### DOs and DON'Ts
+
+Please do:
+
+* **DO** follow our [coding style](docs/coding-guidelines/coding-style.md) (C# code-specific).
+* **DO** give priority to the current style of the project or file you're changing even if it diverges from the general guidelines.
+* **DO** keep the discussions focused. When a new or related topic comes up
+  it's often better to create new issue than to side track the discussion.
+* **DO** clearly state on an issue that you are going to take on implementing it.
+* **DO** blog and tweet (or whatever) about your contributions, frequently!
+
+Please do not:
+
+* **DON'T** make PRs for style changes.
+* **DON'T** surprise us with big pull requests. Instead, file an issue and talk with us on Discord to start
+  a discussion so we can agree on a direction before you invest a large amount
+  of time.
+* **DON'T** commit code that you didn't write. If you find code that you think is a good fit to add to Ryujinx, file an issue or talk to us on Discord to start a discussion before proceeding.
+* **DON'T** submit PRs that alter licensing related files or headers. If you believe there's a problem with them, file an issue and we'll be happy to discuss it.
+
+### Suggested Workflow
+
+We use and recommend the following workflow:
+
+1. Create or find an issue for your work.
+  - You can skip this step for trivial changes.
+  - Get agreement from the team and the community that your proposed change is a good one if it is of significant size or changes core functionality.
+  - Clearly state that you are going to take on implementing it, if that's the case. You can request that the issue be assigned to you. Note: The issue filer and the implementer don't have to be the same person.
+2. Create a personal fork of the repository on GitHub (if you don't already have one).
+3. In your fork, create a branch off of main (`git checkout -b mybranch`).
+  - Branches are useful since they isolate your changes from incoming changes from upstream. They also enable you to create multiple PRs from the same fork.
+4. Make and commit your changes to your branch.
+  - [Build Instructions](https://git.ryujinx.app/kenji-nx/ryujinx#building) explains how to build and test.
+  - Commit messages should be clear statements of action and intent.
+6. Build the repository with your changes.
+  - Make sure that the builds are clean.
+  - Make sure that `dotnet format` has been run and any corrections tested and committed.
+7. Create a pull request (PR) against the Ryujinx/Ryujinx repository's **main** branch.
+  - State in the description what issue or improvement your change is addressing.
+8. Wait for feedback or approval of your changes from the core development team
+  - Details about the pull request [review procedure](docs/workflow/ci/pr-guide.md).
+9. When the team members have signed off, and all checks are green, your PR will be merged.
+  - The next official build will automatically include your change.
+  - You can delete the branch you used for making the change.
+
+### Commit Messages
+
+Please format commit messages as follows (based on [A Note About Git Commit Messages](http://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html)):
+
+```
+Summarize change in 50 characters or less
+
+Provide more detail after the first line. Leave one blank line below the
+summary and wrap all lines at 72 characters or less.
+
+If the change fixes an issue, leave another blank line after the final
+paragraph and indicate which issue is fixed in the specific format
+below.
+
+Fix #42
+```
+
+Also do your best to factor commits appropriately, not too large with unrelated things in the same commit, and not too small with the same small change applied N times in N different commits.
+
+### PR Feedback
+
+Ryujinx team and community members will provide feedback on your change. Community feedback is highly valued. You may see the absence of team feedback if the community has already provided good review feedback.
+
+Two Ryujinx team members must review and approve every PR prior to merge. They will often reply with "LGTM, see nit". That means that the PR will be merged once the feedback is resolved. "LGTM" == "looks good to me".
+
+There are lots of thoughts and [approaches](https://github.com/antlr/antlr4-cpp/blob/master/CONTRIBUTING.md#emoji) for how to efficiently discuss changes. It is best to be clear and explicit with your feedback. Please be patient with people who might not understand the finer details about your approach to feedback.
+
+#### Copying Changes from Other Projects
+
+Ryujinx uses some implementations and frameworks from other projects. The following rules must be followed for PRs that include changes from another project:
+
+- The license of the file is [permissive](https://en.wikipedia.org/wiki/Permissive_free_software_licence).
+- The license of the file is left in-tact.
+- The contribution is correctly attributed in the [3rd party notices](distribution/legal/THIRDPARTY.md) file in the repository, as needed.
 

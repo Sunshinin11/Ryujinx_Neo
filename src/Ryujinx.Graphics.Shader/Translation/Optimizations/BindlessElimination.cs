@@ -103,21 +103,6 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 texturePoolLength,
                 hasSampler);
 
-            // NEOV2-ARRAYFB1: record the sampled pool index, so the GPU side only creates textures the game really uses.
-            if (resourceManager.TryGetTextureArrayFeedbackBinding(out int feedbackBinding))
-            {
-                block.Operations.AddBefore(node, new Operation(
-                    Instruction.Store,
-                    StorageKind.StorageBuffer,
-                    null,
-                    OperandHelper.Const(feedbackBinding),
-                    OperandHelper.Const(0),
-                    textureIndex,
-                    OperandHelper.Const(1)));
-
-                resourceManager.SetTextureArrayFeedback(textureSetAndBinding, texOp.Inst.IsImage());
-            }
-
             if (hasSampler)
             {
                 Operand samplerIndex = OperandHelper.Local();

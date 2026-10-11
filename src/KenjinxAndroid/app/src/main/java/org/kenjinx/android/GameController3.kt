@@ -82,7 +82,7 @@ class GameController3(var activity: Activity) : IGameController {
 
                     controller.controllerView = c
                     viewModel.setGameController(controller)
-                    controller.setVisible(viewModel.getSettingsForGame().useVirtualController)
+                    controller.setVisible(QuickSettings(viewModel.activity).useVirtualController)
                     c
                 }
             )

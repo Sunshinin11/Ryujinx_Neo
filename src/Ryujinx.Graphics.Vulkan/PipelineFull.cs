@@ -142,7 +142,9 @@ namespace Ryujinx.Graphics.Vulkan
             }
 
             var buffer = _activeConditionalRender.GetBuffer().Get(Cbs, 0, sizeof(long)).Value;
-            var flags = _activeConditionalRenderInverted ? ConditionalRenderingFlagsEXT.InvertedBitExt : 0;
+            var flags = _activeConditionalRenderInverted
+                ? ConditionalRenderingFlagsEXT.InvertedBitExt
+                : 0;
 
             var beginInfo = new ConditionalRenderingBeginInfoEXT
             {
@@ -152,8 +154,6 @@ namespace Ryujinx.Graphics.Vulkan
                 Flags = flags,
             };
 
-            // CmdCopyQueryPoolResults writes this buffer in the transfer stage. Make that value
-            // visible to the conditional-rendering stage before the guest draw consumes it.
             BufferHolder.InsertBufferBarrier(
                 Gd,
                 CommandBuffer,
@@ -165,7 +165,10 @@ namespace Ryujinx.Graphics.Vulkan
                 0,
                 sizeof(long));
 
-            Gd.ConditionalRenderingApi.CmdBeginConditionalRendering(CommandBuffer, in beginInfo);
+            Gd.ConditionalRenderingApi.CmdBeginConditionalRendering(
+                CommandBuffer,
+                in beginInfo);
+
             _conditionalRenderingActive = true;
         }
 
@@ -180,22 +183,15 @@ namespace Ryujinx.Graphics.Vulkan
 
         public bool TryHostConditionalRendering(ICounterEvent value, ulong compare, bool isEqual)
         {
-            // Compare an event and a constant value.
             if (value is CounterQueueEvent evt)
             {
-                // Easy host conditional rendering when the check matches what GL can do:
-                //  - Event is of type samples passed.
-                //  - Result is not a combination of multiple queries.
-                //  - Comparing against 0.
-                //  - Event has not already been flushed.
-
                 if (Gd.Capabilities.SupportsConditionalRendering &&
-                    compare == 0 && evt.Type == CounterType.SamplesPassed && evt.ClearCounter)
+                    compare == 0 &&
+                    evt.Type == CounterType.SamplesPassed &&
+                    evt.ClearCounter)
                 {
                     if (!value.ReserveForHostAccess())
                     {
-                        // If the event has been flushed, then just use the values on the CPU.
-                        // The query object may already be repurposed for another draw (eg. begin + end).
                         return false;
                     }
 
@@ -205,9 +201,7 @@ namespace Ryujinx.Graphics.Vulkan
                 }
             }
 
-            // The GPU will flush the queries to CPU and evaluate the condition there instead.
-
-            FlushPendingQuery(); // The thread will be stalled manually flushing the counter, so flush commands now.
+            FlushPendingQuery();
             return false;
         }
 
@@ -249,9 +243,7 @@ namespace Ryujinx.Graphics.Vulkan
                 // in use by the current command buffer is above a given limit, and those resources were disposed.
                 _byteWeight += byteWeight;
 
-                // NEOV2-GPUMEM2: with "Memoria de GPU estilo Eden", submit after 64 MB of released resources
-                // (texture upload buffers during loading screens) instead of 256 MB.
-                if (_byteWeight >= (Ryujinx.Graphics.GAL.GpuMemoryStats.HostRamGuardEnabled ? 64UL * 1024 * 1024 : MinByteWeightForFlush))
+                if (_byteWeight >= MinByteWeightForFlush)
                 {
                     FlushCommandsImpl();
                 }

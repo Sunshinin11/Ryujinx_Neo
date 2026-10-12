@@ -2,9 +2,11 @@ using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Silk.NET.Vulkan;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Ryujinx.Graphics.Vulkan
@@ -63,6 +65,26 @@ namespace Ryujinx.Graphics.Vulkan
         private DisposableRenderPass _dummyRenderPass;
         private readonly Task _compileTask;
         private bool _firstBackgroundUse;
+
+        // NEO-GPL: pre-rasterization and fragment shader libraries built from this program,
+        // and link time optimized pipelines waiting to replace their fast linked versions.
+        private readonly Lock _libraryCacheLock = new();
+        private Dictionary<PipelineLibraryKey, Pipeline> _preRasterizationLibraries;
+        private Dictionary<PipelineLibraryKey, Pipeline> _fragmentShaderLibraries;
+        private readonly ConcurrentQueue<(PipelineUid Key, Pipeline Pipeline)> _optimizedPipelines = new();
+        private int _optimizedPipelinesPending;
+        private List<Auto<DisposablePipeline>> _replacedPipelines;
+        private Dictionary<Auto<DisposablePipeline>, (PipelineUid Key, PipelineLibrarySet Libraries)> _lazyOptimizations;
+        private int _lazyOptimizationsCount;
+
+        internal readonly Lock LibraryLifetimeLock = new();
+        internal bool LibrariesDisposed { get; private set; }
+
+        public bool HasFragmentShader => (Stages & (1u << 1)) != 0;
+
+        // Programs loaded from the shader cache at boot keep compiling full pipelines in the background
+        // (the driver disk cache makes that fast), libraries are only built when the game needs a new variant.
+        public bool IsFromCache { get; }
 
         public ShaderCollection(
             VulkanRenderer gd,
@@ -155,6 +177,7 @@ namespace Ryujinx.Graphics.Vulkan
             bool fromCache) : this(gd, device, sources, resourceLayout)
         {
             _state = state;
+            IsFromCache = fromCache;
 
             _compileTask = BackgroundCompilation();
             _firstBackgroundUse = !fromCache;
@@ -663,8 +686,120 @@ namespace Ryujinx.Graphics.Vulkan
             return false;
         }
 
+        public bool TryGetPreRasterizationLibrary(PipelineLibraryKey key, out Pipeline library)
+        {
+            lock (_libraryCacheLock)
+            {
+                library = default;
+
+                return _preRasterizationLibraries != null && _preRasterizationLibraries.TryGetValue(key, out library);
+            }
+        }
+
+        public bool TryGetFragmentShaderLibrary(PipelineLibraryKey key, out Pipeline library)
+        {
+            lock (_libraryCacheLock)
+            {
+                library = default;
+
+                return _fragmentShaderLibraries != null && _fragmentShaderLibraries.TryGetValue(key, out library);
+            }
+        }
+
+        public Pipeline AddPreRasterizationLibrary(PipelineLibraryKey key, Pipeline library)
+        {
+            return AddLibrary(ref _preRasterizationLibraries, key, library);
+        }
+
+        public Pipeline AddFragmentShaderLibrary(PipelineLibraryKey key, Pipeline library)
+        {
+            return AddLibrary(ref _fragmentShaderLibraries, key, library);
+        }
+
+        private Pipeline AddLibrary(ref Dictionary<PipelineLibraryKey, Pipeline> dictionary, PipelineLibraryKey key, Pipeline library)
+        {
+            lock (_libraryCacheLock)
+            {
+                dictionary ??= new();
+
+                if (dictionary.TryGetValue(key, out Pipeline existing))
+                {
+                    _gd.PipelineLibrary.DestroyPipeline(library);
+
+                    return existing;
+                }
+
+                dictionary.Add(key, library);
+
+                return library;
+            }
+        }
+
+        public void AddLazyOptimization(Auto<DisposablePipeline> pipeline, ref PipelineUid key, PipelineLibrarySet libraries)
+        {
+            lock (_libraryCacheLock)
+            {
+                (_lazyOptimizations ??= new())[pipeline] = (key, libraries);
+                Volatile.Write(ref _lazyOptimizationsCount, _lazyOptimizations.Count);
+            }
+        }
+
+        private void CheckLazyOptimization(Auto<DisposablePipeline> pipeline)
+        {
+            (PipelineUid Key, PipelineLibrarySet Libraries) entry;
+
+            lock (_libraryCacheLock)
+            {
+                if (_lazyOptimizations == null || !_lazyOptimizations.Remove(pipeline, out entry))
+                {
+                    return;
+                }
+
+                Volatile.Write(ref _lazyOptimizationsCount, _lazyOptimizations.Count);
+            }
+
+            _gd.PipelineLibrary.EnqueueOptimize(this, ref entry.Key, entry.Libraries, PipelineLayout);
+        }
+
+        // Called by the optimizer thread with LibraryLifetimeLock held.
+        public void AddOptimizedPipeline(ref PipelineUid key, Pipeline pipeline)
+        {
+            _optimizedPipelines.Enqueue((key, pipeline));
+            Interlocked.Increment(ref _optimizedPipelinesPending);
+        }
+
+        private void ApplyOptimizedPipelines()
+        {
+            while (_optimizedPipelines.TryDequeue(out (PipelineUid Key, Pipeline Pipeline) item))
+            {
+                Interlocked.Decrement(ref _optimizedPipelinesPending);
+
+                PipelineUid key = item.Key;
+
+                _graphicsPipelineCache ??= new();
+
+                if (_graphicsPipelineCache.TryGetValue(ref key, out Auto<DisposablePipeline> fastLinked))
+                {
+                    _graphicsPipelineCache.Remove(ref key);
+
+                    // The fast linked pipeline may still be bound by the pipeline state, so keep it alive with the program.
+                    if (fastLinked != null)
+                    {
+                        (_replacedPipelines ??= new()).Add(fastLinked);
+                    }
+                }
+
+                _graphicsPipelineCache.Add(ref key, new Auto<DisposablePipeline>(new DisposablePipeline(_gd.Api, _device, item.Pipeline)));
+            }
+        }
+
         public bool TryGetGraphicsPipeline(ref PipelineUid key, out Auto<DisposablePipeline> pipeline)
         {
+            if (Volatile.Read(ref _optimizedPipelinesPending) != 0)
+            {
+                ApplyOptimizedPipelines();
+            }
+
             if (_graphicsPipelineCache == null)
             {
                 pipeline = default;
@@ -683,6 +818,11 @@ namespace Ryujinx.Graphics.Vulkan
             }
 
             _firstBackgroundUse = false;
+
+            if (pipeline != null && Volatile.Read(ref _lazyOptimizationsCount) != 0)
+            {
+                CheckLazyOptimization(pipeline);
+            }
 
             return true;
         }
@@ -717,6 +857,59 @@ namespace Ryujinx.Graphics.Vulkan
             return other != null && _plce == other._plce;
         }
 
+        private void DisposeLibraries()
+        {
+            PipelineLibraryCache libraryCache = _gd.PipelineLibrary;
+
+            if (libraryCache == null)
+            {
+                return;
+            }
+
+            lock (LibraryLifetimeLock)
+            {
+                LibrariesDisposed = true;
+
+                while (_optimizedPipelines.TryDequeue(out (PipelineUid Key, Pipeline Pipeline) item))
+                {
+                    libraryCache.DestroyPipeline(item.Pipeline);
+                }
+
+                lock (_libraryCacheLock)
+                {
+                    if (_preRasterizationLibraries != null)
+                    {
+                        foreach (Pipeline library in _preRasterizationLibraries.Values)
+                        {
+                            libraryCache.DestroyPipeline(library);
+                        }
+
+                        _preRasterizationLibraries = null;
+                    }
+
+                    if (_fragmentShaderLibraries != null)
+                    {
+                        foreach (Pipeline library in _fragmentShaderLibraries.Values)
+                        {
+                            libraryCache.DestroyPipeline(library);
+                        }
+
+                        _fragmentShaderLibraries = null;
+                    }
+                }
+            }
+
+            if (_replacedPipelines != null)
+            {
+                foreach (Auto<DisposablePipeline> pipeline in _replacedPipelines)
+                {
+                    pipeline.Dispose();
+                }
+
+                _replacedPipelines = null;
+            }
+        }
+
         protected virtual void Dispose(bool disposing)
         {
             if (disposing)
@@ -730,6 +923,8 @@ namespace Ryujinx.Graphics.Vulkan
                 {
                     _shaders[i].Dispose();
                 }
+
+                DisposeLibraries();
 
                 if (_graphicsPipelineCache != null)
                 {

@@ -66,6 +66,7 @@ namespace Ryujinx.Graphics.Vulkan
         internal bool SupportsTimelineSemaphore { get; private set; }
         internal CommandBufferPool CommandBufferPool { get; private set; }
         internal PipelineLayoutCache PipelineLayoutCache { get; private set; }
+        internal PipelineLibraryCache PipelineLibrary { get; private set; }
         internal BackgroundResources BackgroundResources { get; private set; }
         internal Action<Action> InterruptAction { get; private set; }
         internal SyncManager SyncManager { get; private set; }
@@ -559,6 +560,7 @@ namespace Ryujinx.Graphics.Vulkan
             CommandBufferPool = new CommandBufferPool(Api, _device, QueueSubmissionWorker, queueFamilyIndex, IsQualcommProprietary, IsTurnip);
 
             PipelineLayoutCache = new PipelineLayoutCache();
+            PipelineLibrary = PipelineLibraryCache.TryCreate(this, _device, _physicalDevice);
 
             BackgroundResources = new BackgroundResources(this, _device);
 
@@ -1314,6 +1316,7 @@ namespace Ryujinx.Graphics.Vulkan
                 return;
             }
 
+            PipelineLibrary?.StopWorkers();
             CommandBufferPool.Dispose();
             BackgroundResources.Dispose();
             _counters.Dispose();
@@ -1334,6 +1337,8 @@ namespace Ryujinx.Graphics.Vulkan
             foreach (ShaderCollection shader in Shaders) shader.Dispose();
             foreach (ITexture texture in Textures) texture.Release();
             foreach (SamplerHolder sampler in Samplers) sampler.Dispose();
+
+            PipelineLibrary?.Dispose();
 
             if (_surface.Handle != 0)
             {

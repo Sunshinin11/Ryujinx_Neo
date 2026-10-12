@@ -49,7 +49,9 @@ namespace Ryujinx.Graphics.Vulkan
             "VK_KHR_maintenance2",
             "VK_EXT_attachment_feedback_loop_layout",
             "VK_EXT_attachment_feedback_loop_dynamic_state",
-            "VK_EXT_memory_priority"
+            "VK_EXT_memory_priority",
+            "VK_KHR_pipeline_library",
+            "VK_EXT_graphics_pipeline_library"
         ];
 
         private static readonly string[] _requiredExtensions =
@@ -714,6 +716,37 @@ namespace Ryujinx.Graphics.Vulkan
                 };
 
                 pExtendedFeatures = &featuresDeviceMemoryPriority;
+            }
+
+            // NEO-GPL: enable VK_EXT_graphics_pipeline_library when the device supports it.
+            PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT featuresGraphicsPipelineLibrary = new()
+            {
+                SType = StructureType.PhysicalDeviceGraphicsPipelineLibraryFeaturesExt,
+            };
+
+            if (physicalDevice.IsDeviceExtensionPresent("VK_EXT_graphics_pipeline_library") &&
+                physicalDevice.IsDeviceExtensionPresent("VK_KHR_pipeline_library"))
+            {
+                PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT supportedFeaturesGraphicsPipelineLibrary = new()
+                {
+                    SType = StructureType.PhysicalDeviceGraphicsPipelineLibraryFeaturesExt,
+                };
+
+                PhysicalDeviceFeatures2 graphicsPipelineLibraryFeatures2 = new()
+                {
+                    SType = StructureType.PhysicalDeviceFeatures2,
+                    PNext = &supportedFeaturesGraphicsPipelineLibrary,
+                };
+
+                api.GetPhysicalDeviceFeatures2(physicalDevice.PhysicalDevice, &graphicsPipelineLibraryFeatures2);
+
+                if (supportedFeaturesGraphicsPipelineLibrary.GraphicsPipelineLibrary)
+                {
+                    featuresGraphicsPipelineLibrary.PNext = pExtendedFeatures;
+                    featuresGraphicsPipelineLibrary.GraphicsPipelineLibrary = true;
+
+                    pExtendedFeatures = &featuresGraphicsPipelineLibrary;
+                }
             }
 
             string[] enabledExtensions = _requiredExtensions.Union(_desirableExtensions.Intersect(physicalDevice.DeviceExtensions)).ToArray();

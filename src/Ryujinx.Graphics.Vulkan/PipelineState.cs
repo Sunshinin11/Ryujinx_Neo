@@ -1,6 +1,7 @@
 using Ryujinx.Common.Memory;
 using Silk.NET.Vulkan;
 using System;
+using System.Diagnostics;
 using System.Numerics;
 using System.Threading;
 
@@ -408,6 +409,8 @@ namespace Ryujinx.Graphics.Vulkan
             }
 
             Pipeline pipelineHandle = default;
+            PipelineLibrarySet librarySet = default;
+            bool fromLibraries = false;
 
             bool isMoltenVk = gd.IsMoltenVk;
 
@@ -652,11 +655,63 @@ namespace Ryujinx.Graphics.Vulkan
                     RenderPass = renderPass,
                 };
 
-                Result result;
+                Result result = Result.Success;
 
+                // NEO-GPL: build the pipeline from libraries with a fast link when possible.
+                PipelineLibraryCache libraryCache = gd.PipelineLibrary;
+
+                if (libraryCache != null && !(throwOnError && program.IsFromCache))
+                {
+                    if (flags != 0 || RasterizerDiscardEnable || !program.HasFragmentShader)
+                    {
+                        libraryCache.RecordFallback();
+                    }
+                    else
+                    {
+                        long linkStart = Stopwatch.GetTimestamp();
+
+                        // Libraries and linked pipelines are not stored in our persistent pipeline cache:
+                        // the driver disk cache already keeps them, and they would bloat the shared cache file.
+                        bool haveLibraries = TryGetLibraries(
+                            gd,
+                            libraryCache,
+                            program,
+                            default,
+                            renderPass,
+                            &vertexInputState,
+                            &inputAssemblyState,
+                            &tessellationState,
+                            &viewportState,
+                            &rasterizationState,
+                            &multisampleState,
+                            &depthStencilState,
+                            &colorBlendState,
+                            &pipelineDynamicStateCreateInfo,
+                            out librarySet,
+                            out bool compiledShaders);
+
+                        // Background compilation (throwOnError) takes the same path: the render thread waits for it
+                        // when the shader is new, so the full compile is left to the optimizer threads.
+                        if (haveLibraries)
+                        {
+                            pipelineHandle = libraryCache.Link(librarySet, PipelineLayout, renderPass, default, optimize: false);
+
+                            if (pipelineHandle.Handle != 0)
+                            {
+                                fromLibraries = true;
+                                libraryCache.RecordLink(Stopwatch.GetTimestamp() - linkStart, compiledShaders);
+                            }
+                        }
+                    }
+                }
+
+                if (fromLibraries)
+                {
+                    // Already created.
+                }
                 // NEOV2 Etapa 8: a trava global so e necessaria no Adreno 8xx (commit 6840ae0c).
                 // Nas demais GPUs os pipelines podem ser criados em paralelo.
-                if (gd.IsAdreno8xx)
+                else if (gd.IsAdreno8xx)
                 {
                     lock (_pipelineCreateLock)
                     {
@@ -679,7 +734,10 @@ namespace Ryujinx.Graphics.Vulkan
                     return null;
                 }
 
-                PipelineCachePersistence.RecordPipelineCreated();
+                if (!fromLibraries)
+                {
+                    PipelineCachePersistence.RecordPipelineCreated();
+                }
 
                 // Restore previous blend enable values if we changed it.
                 while (blendEnables != 0)
@@ -695,8 +753,243 @@ namespace Ryujinx.Graphics.Vulkan
 
             program.AddGraphicsPipeline(ref Internal, pipeline);
 
+            if (fromLibraries && gd.PipelineLibrary.OptimizeEnabled)
+            {
+                if (throwOnError)
+                {
+                    // Background compilation: only optimize if a draw actually uses this pipeline.
+                    program.AddLazyOptimization(pipeline, ref Internal, librarySet);
+                }
+                else
+                {
+                    gd.PipelineLibrary.EnqueueOptimize(program, ref Internal, librarySet, PipelineLayout);
+                }
+            }
+
             return pipeline;
         }
+
+        private static unsafe PipelineLibraryKey BuildVertexInputKey(
+            PipelineVertexInputStateCreateInfo* vertexInputState,
+            PipelineInputAssemblyStateCreateInfo* inputAssemblyState)
+        {
+            PipelineLibraryKeyBuilder key = new(256);
+
+            key.Add(vertexInputState->VertexAttributeDescriptionCount);
+            key.Add(vertexInputState->VertexBindingDescriptionCount);
+            key.AddSpan(new ReadOnlySpan<VertexInputAttributeDescription>(vertexInputState->PVertexAttributeDescriptions, (int)vertexInputState->VertexAttributeDescriptionCount));
+            key.AddSpan(new ReadOnlySpan<VertexInputBindingDescription>(vertexInputState->PVertexBindingDescriptions, (int)vertexInputState->VertexBindingDescriptionCount));
+            key.Add(inputAssemblyState->Topology);
+            key.Add(inputAssemblyState->PrimitiveRestartEnable);
+
+            return key.Build();
+        }
+
+        private void AddRenderPassKey(ref PipelineLibraryKeyBuilder key)
+        {
+            // Render pass compatibility: attachment formats and sample count, as used by PipelineUid.
+            uint colorCount = ColorBlendAttachmentStateCount;
+            int formatCount = (int)colorCount + (HasDepthStencil ? 1 : 0);
+
+            key.Add(colorCount);
+            key.Add(HasDepthStencil);
+            key.Add(SamplesCount);
+            key.AddSpan<Format>(Internal.AttachmentFormats.AsSpan()[..formatCount]);
+        }
+
+        private static unsafe void AddMultisampleKey(ref PipelineLibraryKeyBuilder key, PipelineMultisampleStateCreateInfo* multisampleState)
+        {
+            key.Add(multisampleState->RasterizationSamples);
+            key.Add(multisampleState->SampleShadingEnable);
+            key.Add(multisampleState->MinSampleShading);
+            key.Add(multisampleState->AlphaToCoverageEnable);
+            key.Add(multisampleState->AlphaToOneEnable);
+        }
+
+        private unsafe bool TryGetLibraries(
+            VulkanRenderer gd,
+            PipelineLibraryCache libraryCache,
+            ShaderCollection program,
+            PipelineCache cache,
+            RenderPass renderPass,
+            PipelineVertexInputStateCreateInfo* vertexInputState,
+            PipelineInputAssemblyStateCreateInfo* inputAssemblyState,
+            PipelineTessellationStateCreateInfo* tessellationState,
+            PipelineViewportStateCreateInfo* viewportState,
+            PipelineRasterizationStateCreateInfo* rasterizationState,
+            PipelineMultisampleStateCreateInfo* multisampleState,
+            PipelineDepthStencilStateCreateInfo* depthStencilState,
+            PipelineColorBlendStateCreateInfo* colorBlendState,
+            PipelineDynamicStateCreateInfo* dynamicState,
+            out PipelineLibrarySet libraries,
+            out bool compiledShaders)
+        {
+            libraries = default;
+            compiledShaders = false;
+
+            // Vertex input interface (global).
+            PipelineLibraryKey vertexInputKey = BuildVertexInputKey(vertexInputState, inputAssemblyState);
+
+            if (!libraryCache.TryGetVertexInput(vertexInputKey, out libraries.VertexInput))
+            {
+                GraphicsPipelineCreateInfo info = new()
+                {
+                    SType = StructureType.GraphicsPipelineCreateInfo,
+                    PVertexInputState = vertexInputState,
+                    PInputAssemblyState = inputAssemblyState,
+                    PDynamicState = dynamicState,
+                    BasePipelineIndex = -1,
+                };
+
+                Pipeline library = libraryCache.CreateLibrary(GraphicsPipelineLibraryFlagsEXT.VertexInputInterfaceBitExt, info, cache);
+
+                if (library.Handle == 0)
+                {
+                    return false;
+                }
+
+                libraries.VertexInput = libraryCache.AddVertexInput(vertexInputKey, library);
+            }
+
+            // Pre-rasterization shaders (per program).
+            PipelineLibraryKeyBuilder preRasterizationKeyBuilder = new(128);
+
+            PipelineRasterizationStateCreateInfo rasterizationKey = *rasterizationState;
+            rasterizationKey.PNext = null;
+            preRasterizationKeyBuilder.Add(rasterizationKey);
+            preRasterizationKeyBuilder.Add(viewportState->ViewportCount);
+            preRasterizationKeyBuilder.Add(viewportState->ScissorCount);
+            preRasterizationKeyBuilder.Add(gd.Capabilities.SupportsDepthClipControl && DepthMode);
+            preRasterizationKeyBuilder.Add(HasTessellationControlShader ? tessellationState->PatchControlPoints : 0u);
+            AddRenderPassKey(ref preRasterizationKeyBuilder);
+
+            PipelineLibraryKey preRasterizationKey = preRasterizationKeyBuilder.Build();
+
+            if (!program.TryGetPreRasterizationLibrary(preRasterizationKey, out libraries.PreRasterization))
+            {
+                PipelineShaderStageCreateInfo* preRasterizationStages = stackalloc PipelineShaderStageCreateInfo[Constants.MaxShaderStages];
+                uint preRasterizationStageCount = 0;
+
+                for (int i = 0; i < StagesCount; i++)
+                {
+                    if (Stages[i].Stage != ShaderStageFlags.FragmentBit)
+                    {
+                        preRasterizationStages[preRasterizationStageCount++] = Stages[i];
+                    }
+                }
+
+                GraphicsPipelineCreateInfo info = new()
+                {
+                    SType = StructureType.GraphicsPipelineCreateInfo,
+                    StageCount = preRasterizationStageCount,
+                    PStages = preRasterizationStages,
+                    PTessellationState = HasTessellationControlShader ? tessellationState : null,
+                    PViewportState = viewportState,
+                    PRasterizationState = rasterizationState,
+                    PDynamicState = dynamicState,
+                    Layout = PipelineLayout,
+                    RenderPass = renderPass,
+                    BasePipelineIndex = -1,
+                };
+
+                Pipeline library = libraryCache.CreateLibrary(GraphicsPipelineLibraryFlagsEXT.PreRasterizationShadersBitExt, info, cache);
+                compiledShaders = true;
+
+                if (library.Handle == 0)
+                {
+                    return false;
+                }
+
+                libraries.PreRasterization = program.AddPreRasterizationLibrary(preRasterizationKey, library);
+            }
+
+            // Fragment shader (per program).
+            PipelineLibraryKeyBuilder fragmentShaderKeyBuilder = new(128);
+
+            PipelineDepthStencilStateCreateInfo depthStencilKey = *depthStencilState;
+            depthStencilKey.PNext = null;
+            fragmentShaderKeyBuilder.Add(depthStencilKey);
+            AddMultisampleKey(ref fragmentShaderKeyBuilder, multisampleState);
+            AddRenderPassKey(ref fragmentShaderKeyBuilder);
+
+            PipelineLibraryKey fragmentShaderKey = fragmentShaderKeyBuilder.Build();
+
+            if (!program.TryGetFragmentShaderLibrary(fragmentShaderKey, out libraries.FragmentShader))
+            {
+                PipelineShaderStageCreateInfo fragmentStage = default;
+
+                for (int i = 0; i < StagesCount; i++)
+                {
+                    if (Stages[i].Stage == ShaderStageFlags.FragmentBit)
+                    {
+                        fragmentStage = Stages[i];
+                    }
+                }
+
+                GraphicsPipelineCreateInfo info = new()
+                {
+                    SType = StructureType.GraphicsPipelineCreateInfo,
+                    StageCount = 1,
+                    PStages = &fragmentStage,
+                    PMultisampleState = multisampleState,
+                    PDepthStencilState = depthStencilState,
+                    PDynamicState = dynamicState,
+                    Layout = PipelineLayout,
+                    RenderPass = renderPass,
+                    BasePipelineIndex = -1,
+                };
+
+                Pipeline library = libraryCache.CreateLibrary(GraphicsPipelineLibraryFlagsEXT.FragmentShaderBitExt, info, cache);
+                compiledShaders = true;
+
+                if (library.Handle == 0)
+                {
+                    return false;
+                }
+
+                libraries.FragmentShader = program.AddFragmentShaderLibrary(fragmentShaderKey, library);
+            }
+
+            // Fragment output interface (global).
+            PipelineLibraryKeyBuilder fragmentOutputKeyBuilder = new(384);
+
+            fragmentOutputKeyBuilder.Add(colorBlendState->LogicOpEnable);
+            fragmentOutputKeyBuilder.Add(colorBlendState->LogicOp);
+            fragmentOutputKeyBuilder.Add(colorBlendState->AttachmentCount);
+            fragmentOutputKeyBuilder.AddSpan(new ReadOnlySpan<PipelineColorBlendAttachmentState>(colorBlendState->PAttachments, (int)colorBlendState->AttachmentCount));
+            fragmentOutputKeyBuilder.Add(AdvancedBlendSrcPreMultiplied);
+            fragmentOutputKeyBuilder.Add(AdvancedBlendDstPreMultiplied);
+            fragmentOutputKeyBuilder.Add(AdvancedBlendOverlap);
+            AddMultisampleKey(ref fragmentOutputKeyBuilder, multisampleState);
+            AddRenderPassKey(ref fragmentOutputKeyBuilder);
+
+            PipelineLibraryKey fragmentOutputKey = fragmentOutputKeyBuilder.Build();
+
+            if (!libraryCache.TryGetFragmentOutput(fragmentOutputKey, out libraries.FragmentOutput))
+            {
+                GraphicsPipelineCreateInfo info = new()
+                {
+                    SType = StructureType.GraphicsPipelineCreateInfo,
+                    PColorBlendState = colorBlendState,
+                    PMultisampleState = multisampleState,
+                    PDynamicState = dynamicState,
+                    RenderPass = renderPass,
+                    BasePipelineIndex = -1,
+                };
+
+                Pipeline library = libraryCache.CreateLibrary(GraphicsPipelineLibraryFlagsEXT.FragmentOutputInterfaceBitExt, info, cache);
+
+                if (library.Handle == 0)
+                {
+                    return false;
+                }
+
+                libraries.FragmentOutput = libraryCache.AddFragmentOutput(fragmentOutputKey, library);
+            }
+
+            return true;
+        }
+
 
         private void UpdateVertexAttributeDescriptions(VulkanRenderer gd)
         {

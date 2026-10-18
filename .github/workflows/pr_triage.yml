@@ -14,7 +14,7 @@ jobs:
     steps:
       # Grab sources to get latest labeler.yml
       - name: Fetch sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
            # Ensure we pin the source origin as pull_request_target run under forks.
            fetch-depth: 0
